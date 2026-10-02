@@ -1,0 +1,24 @@
+[package]
+name = "rust-ft8"
+version = "0.1.0"
+edition = "2021"
+authors = ["YES-ESP-DX Team"]
+description = "A pure-Rust, highly accurate FT8 codec library matching WSJT-X and JTDX performance"
+
+[dependencies]
+rustfft = "6.4.1"
+rayon = "1.11.0"
+num-complex = "0.4.6"
+regex = "1.12.3"
+
+[lib]
+name = "rust_ft8"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ft8_decode"
+path = "src/bin/ft8_decode.rs"
+
+[[bin]]
+name = "ft8_encode"
+path = "src/bin/ft8_encode.rs"

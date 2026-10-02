@@ -1,0 +1,7 @@
+/target
+/reference
+/jtdx
+*.exe
+*.pdb
+*.o
+*.a
