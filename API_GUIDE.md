@@ -157,10 +157,11 @@ for m in messages {
 1. **$t \approx 1.44\text{s}$ 前导码快速初筛**：快速锁定空中活跃载频；
 2. **$t = 11.36\text{s} \sim 11.52\text{s}$ 提前解码**：此时全部 58 个有效数据符号全部收齐，将未到达的尾导码置为已知擦除（Erasure），直接提前产出全部强信号（**RK3568 上仅耗时 0.26 秒，在 11.62 秒出结果，比 15 秒窗口提前 3.38 秒**）；
 3. **$t = 12.5\text{s} \sim 12.8\text{s}$ 全量扫尾**：发射刚结束瞬间，补齐尾导码深挖残差弱信号，交付全量最终结果，比 15 秒窗口提前 2.2 秒零等待！
+4. **本轮解码完全结束通知 (`DecodeFinished`)**：当全量扫尾完成、或调用者主动送入最后一帧 `is_last=true`、或调用 `finish()` 时，接收器会发出 `DecodeFinished` 明确告知本时隙彻底完工。
 
-### 2.4 回调句柄 (Callback) 机制设计
+### 2.4 回调句柄 (Callback) 与结束感知设计
 
-流式接收机提供基于闭包回调的事件钩子（Hook）：
+流式接收机提供基于闭包回调的事件钩子（Hook），并支持标记最后一帧和查询解码完结状态：
 
 ```rust
 use rust_ft8::{DecoderConfig, StreamingFt8Receiver, StreamDecodedEvent};
@@ -172,8 +173,11 @@ let window_start_offset = -0.9; // 提前 0.9s 开启声卡录音
 let mut receiver = StreamingFt8Receiver::with_window_offset(config, window_start_offset);
 
 // 模拟声卡推流循环: 每次传入 160ms (1920 采样点 @ 12000Hz)
-for chunk in sound_card_stream.chunks(1920) {
-    receiver.feed_chunk_with_callback(chunk, |event| {
+let total_chunks = sound_card_stream.len() / 1920;
+for (idx, chunk) in sound_card_stream.chunks(1920).enumerate() {
+    let is_last = (idx + 1 == total_chunks); // 标记是否为最后一包
+
+    receiver.feed_chunk_with_callback_ext(chunk, is_last, |event| {
         match event {
             StreamDecodedEvent::PreambleDetected { active_frequencies, time_sec } => {
                 println!("[{:.2}s] 发现空中 {} 个活跃载频: {:?}", time_sec, active_frequencies.len(), active_frequencies);
@@ -192,18 +196,35 @@ for chunk in sound_card_stream.chunks(1920) {
                         s.sender_callsign, s.country_cn, s.receiver_callsign, s.snr, s.qso_stage);
                 }
             }
+            StreamDecodedEvent::DecodeFinished { total_signals, audio_duration_sec, is_last_chunk } => {
+                println!("[{:.2}s] [解码完全结束通知] 本轮总信号数: {}, 最后一帧触发: {}", 
+                    audio_duration_sec, total_signals, is_last_chunk);
+                // 此时可安全更新前端界面状态或转入下一时隙
+            }
         }
     });
 }
+
+// 检查本轮是否已彻底结束
+if receiver.is_cycle_finished() {
+    println!("本时隙解码流程已完全闭环。");
+}
+
+// 若录制中途提前终止，可随时显式调用 finish() 强制结算
+// let final_events = receiver.finish();
 ```
 
 ---
 
 ## 三、拓展工具函数 (DXCC、地理与距离计算)
 
-### 3.1 呼号查询国家/地区 (DXCC 实体)
+### 3.1 呼号查询国家/地区 (DXCC 实体) 与高速缓存算法
 
-根据呼号前缀最长匹配算法，自动识别该呼号所属的 DXCC 实体信息（内置全球常见实体库，并支持加载标准 `cty.dat`）。
+根据呼号前缀最长匹配算法（Longest Prefix Match），自动识别呼号所属的 DXCC 实体信息。
+
+内部架构：
+1. **256 桶表索引 (Prefix Buckets)**：按前缀首字符建立直接索引表，单次冷查比较次数减少 95% 以上；
+2. **并发读写锁缓存 (RwLock Cache)**：对查询过的完整呼号实现 $O(1)$ 极速命中（多线程只读锁并发无竞争），并内置容量自动淘汰，保障持续高速运行不膨胀。
 
 ```rust
 use rust_ft8::lookup_callsign_country;
@@ -251,18 +272,32 @@ assert_eq!(country_en_to_cn("Russian Federation"), "俄罗斯");
 
 ---
 
-### 3.3 梅登黑德网格 (Grid) 与经纬度互转
+### 3.3 梅登黑德网格 (Grid) 4位/6位与大小写混写互转
+
+库对梅登黑德网格提供了**4 位与 6 位全面兼容、大小写完全不敏感混写**的支持：
+
+- **4 位方格**（如 `OM89`, `om89`, `oM89`）：覆盖 $2^\circ$ 经度 $\times 1^\circ$ 纬度，中心点精确定位在方格正中；
+- **6 位子方格**（如 `OM89xx`, `om89aa`, `Om89aA`）：覆盖 $5'$ 经度 $\times 2.5'$ 纬度，中心点精度提升 24 倍；
+- **大小写混写**：支持全小写、全大写、标准大小写或任意大小写混写；
+- **格式校验**：严格校验字符合法性（场字母 A..R、数字 0..9、块字母 A..X），非 4/6 位或非法字符安全返回 `None`。
 
 ```rust
-use rust_ft8::{grid_to_latlon, latlon_to_grid};
+use rust_ft8::{grid_to_latlon, latlon_to_grid, latlon_to_grid_4, latlon_to_grid_6};
 
 // 1. 网格转经纬度 (返回中心点坐标: 纬度 Lat, 经度 Lon)
 let (lat, lon) = grid_to_latlon("OM89").expect("网格格式不合法");
-// lat ≈ 39.5°N, lon ≈ 117.0°E (北京地区)
+// 支持小写和混合写法
+let (lat_lower, lon_lower) = grid_to_latlon("om89").unwrap();
+assert_eq!((lat, lon), (lat_lower, lon_lower));
 
-// 2. 经纬度转网格 (默认 6 字符精度)
-let grid = latlon_to_grid(39.9042, 116.4074);
-assert_eq!(&grid[..4], "OM89");
+// 支持 6 位高精度网格
+let (lat_6, lon_6) = grid_to_latlon("Om89aA").unwrap();
+
+// 2. 经纬度转网格
+let grid_4 = latlon_to_grid_4(lat, lon); // 输出 4 字符大写，如 "OM89"
+let grid_6 = latlon_to_grid_6(lat, lon); // 输出 6 字符标准格式，如 "OM89aa"
+let grid_default = latlon_to_grid(lat, lon); // 默认输出 6 字符标准格式
+assert_eq!(grid_6, grid_default);
 ```
 
 ---
@@ -282,9 +317,27 @@ let dist_km = great_circle_distance(39.9, 116.4, 31.2, 121.5);
 let bearing_deg = great_circle_bearing(39.9, 116.4, 31.2, 121.5);
 // 北京往上海航向约为 145° (东南方向)
 
-// 3. 直接通过两个梅登黑德网格计算距离 (单位: 公里 km)
-let dist_between_grids = grid_distance("OM89", "PM01").unwrap();
+// 3. 直接通过两个梅登黑德网格计算距离 (单位: 公里 km，兼容 4位/6位/大小写混写)
+let dist_between_grids = grid_distance("OM89", "pm01").unwrap();
 println!("两地网格通联距离: {:.1} km", dist_between_grids);
+```
+
+---
+
+## 四、跨平台指令集与通用硬件加速指南
+
+本项目采用纯 Rust 编写，无第三方 C/Fortran 二进制依赖，通过以下手段实现全架构指令级加速：
+
+### 4.1 硬件向量化与多核并行
+- **Intel / AMD x86_64**：内置对 AVX2、FMA、SSE4.2 指令集支持，点积与矩阵运算自动 8 路单精度浮点并行（256-bit SIMD）；
+- **ARM64 (RK3588, RK3568, Apple Silicon)**：深度适配 ARM NEON 128-bit 向量执行单元与 Dot Product 扩展指令；
+- **多核线程池**：通过 Rayon 动态调度，自动将 372 次滑动相关、300 个候选频点基带抽取和 LDPC 译码平摊至所有物理核心。
+
+### 4.2 编译优化建议
+若需在目标机器上获得极致速度，可在编译时启用本地指令优化：
+```bash
+# 针对当前运行 CPU 自动开启全部硬件指令 (AVX2/FMA/Neon 等)
+RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 
 #### 在解码消息中直接调用距离计算

@@ -77,24 +77,26 @@ impl SyncSearcher {
         let df = 12000.0 / (NFFT1 as f32); // 3.125 Hz
         let tstep = (NSTEP as f32) / 12000.0; // 0.040s
 
-        // 1. 滑动计算 NHSYM = 372 个 3840 点 FFT 功率谱 (Rayon 多核并行)
+        // 1. 滑动计算 NHSYM = 372 个 3840 点 FFT 功率谱 (Rayon 多核并行 + 线程私有缓冲区复用，0 重复堆分配)
         let mut s = vec![vec![0.0f32; NH1]; NHSYM];
         let fac = 1.0 / 300.0;
 
-        s.par_iter_mut().enumerate().for_each(|(j, s_row)| {
-            let ia = j * NSTEP;
-            let ib = (ia + NSPS).min(audio.len());
-            let mut buf = vec![Complex32::new(0.0, 0.0); NFFT1];
-            for k in 0..NFFT1 {
-                if k < (ib - ia) {
+        s.par_iter_mut().enumerate().for_each_init(
+            || vec![Complex32::new(0.0, 0.0); NFFT1],
+            |buf, (j, s_row)| {
+                let ia = j * NSTEP;
+                let ib = (ia + NSPS).min(audio.len());
+                let valid_len = ib.saturating_sub(ia);
+                for k in 0..valid_len {
                     buf[k] = Complex32::new(fac * audio[ia + k], 0.0);
                 }
-            }
-            self.fft_3840.process(&mut buf);
-            for i in 0..NH1 {
-                s_row[i] = buf[i].norm_sqr();
-            }
-        });
+                buf[valid_len..NFFT1].fill(Complex32::new(0.0, 0.0));
+                self.fft_3840.process(buf);
+                for i in 0..NH1 {
+                    s_row[i] = buf[i].norm_sqr();
+                }
+            },
+        );
 
         let ia = ((nfa / df).round() as usize).max(1);
         let ib = ((nfb / df).round() as usize).min(NH1 - 16);

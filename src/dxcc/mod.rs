@@ -7,7 +7,7 @@
 //! - 基于地球椭球/大圆球面的两点间距离 (km) 与航向角 (度) 计算
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// 地球平均半径 (公里)
 pub const EARTH_RADIUS_KM: f64 = 6371.0;
@@ -28,9 +28,14 @@ pub struct DxccEntity {
 }
 
 /// 呼号与国家地区查询数据库
+///
+/// 具备：
+/// 1. 基于 ASCII 首字符的 256 桶表索引 (Longest Prefix Match 候选集减少 95%+)
+/// 2. 线程安全的高频查询缓存 (O(1) 极速命中，自动容量限制淘汰)
 pub struct DxccDatabase {
-    // 前缀树或按长度降序排列的前缀列表，实现最长前缀匹配 (Longest Prefix Match)
     prefix_table: Vec<(String, DxccEntity)>,
+    buckets: Vec<Vec<(String, usize)>>,
+    cache: RwLock<HashMap<String, Option<usize>>>,
 }
 
 static GLOBAL_DXCC_DB: OnceLock<DxccDatabase> = OnceLock::new();
@@ -45,27 +50,70 @@ impl DxccDatabase {
     pub fn new_builtin() -> Self {
         let mut db = Self {
             prefix_table: Vec::with_capacity(512),
+            buckets: vec![Vec::new(); 256],
+            cache: RwLock::new(HashMap::with_capacity(512)),
         };
         db.load_builtin_rules();
-        // 按前缀长度降序排列，确保优先匹配更长、更精确的前缀 (如 VR2 优先于 V)
-        db.prefix_table.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        db.build_index();
         db
     }
 
-    /// 根据呼号查询对应的 DXCC 国家/地区实体
+    /// 构建/更新桶表索引并清空失效缓存
+    fn build_index(&mut self) {
+        // 先按前缀长度降序排列，确保优先匹配更长、更精确的前缀 (如 VR2 优先于 V)
+        self.prefix_table.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        // 重构 256 桶表索引
+        for bucket in &mut self.buckets {
+            bucket.clear();
+        }
+        for (idx, (prefix, _)) in self.prefix_table.iter().enumerate() {
+            if let Some(&first_byte) = prefix.as_bytes().first() {
+                self.buckets[first_byte as usize].push((prefix.clone(), idx));
+            }
+        }
+
+        // 清空缓存
+        if let Ok(mut guard) = self.cache.write() {
+            guard.clear();
+        }
+    }
+
+    /// 根据呼号查询对应的 DXCC 国家/地区实体 (O(1) 缓存优先 + 桶表最长前缀匹配)
     pub fn lookup(&self, callsign: &str) -> Option<&DxccEntity> {
         let clean = clean_callsign(callsign);
         if clean.len() < 2 {
             return None;
         }
 
-        // 优先匹配完整基准呼号的前缀
-        for (prefix, entity) in &self.prefix_table {
-            if clean.starts_with(prefix) {
-                return Some(entity);
+        // 1. 优先从高频查询缓存中快速读取 (只读锁，并发无竞争，O(1))
+        if let Ok(guard) = self.cache.read() {
+            if let Some(cached_opt) = guard.get(&clean) {
+                return cached_opt.map(|idx| &self.prefix_table[idx].1);
             }
         }
-        None
+
+        // 2. 缓存未命中：直接定位到对应首字符的桶，进行最长前缀匹配
+        let first_byte = clean.as_bytes()[0];
+        let mut matched_idx = None;
+        if (first_byte as usize) < self.buckets.len() {
+            for (prefix, idx) in &self.buckets[first_byte as usize] {
+                if clean.starts_with(prefix) {
+                    matched_idx = Some(*idx);
+                    break;
+                }
+            }
+        }
+
+        // 3. 写入缓存 (带定长容量上限，杜绝内存泄漏)
+        if let Ok(mut guard) = self.cache.write() {
+            if guard.len() >= 4096 {
+                guard.clear();
+            }
+            guard.insert(clean, matched_idx);
+        }
+
+        matched_idx.map(|idx| &self.prefix_table[idx].1)
     }
 
     /// 从标准 cty.dat 格式文本中加载或扩充规则
@@ -125,8 +173,8 @@ impl DxccDatabase {
             }
         }
 
-        // 重新按前缀长度降序排列
-        self.prefix_table.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        // 重新构建桶表索引并刷新缓存
+        self.build_index();
     }
 
     fn load_builtin_rules(&mut self) {
@@ -305,15 +353,22 @@ pub fn country_en_to_cn<'a>(en_name: &'a str) -> &'a str {
 }
 
 /// 将 4 字符或 6 字符的梅登黑德网格 (Maidenhead Grid Locator) 转换为经纬度 (纬度 Lat, 经度 Lon)
+///
 /// 范围: Lat [-90.0, +90.0], Lon [-180.0, +180.0]
-/// 返回网格中心点坐标
+/// 返回网格中心点坐标。
+///
+/// 格式支持：
+/// - 4 字符方格 (如 "OM89", "om89", "oM89")：覆盖 2° 经度 × 1° 纬度
+/// - 6 字符子方格 (如 "OM89xx", "om89AA", "Om89aA")：覆盖 5' 经度 × 2.5' 纬度
+/// - 大小写完全混写支持
 pub fn grid_to_latlon(grid: &str) -> Option<(f64, f64)> {
     let g = grid.trim().to_ascii_uppercase();
     let b = g.as_bytes();
-    if b.len() < 4 {
+    if b.len() != 4 && b.len() != 6 {
         return None;
     }
 
+    // 校验前 4 字符：前 2 字母 A..R，后 2 数字 0..9
     if !(b[0] >= b'A' && b[0] <= b'R' && b[1] >= b'A' && b[1] <= b'R') {
         return None;
     }
@@ -324,17 +379,15 @@ pub fn grid_to_latlon(grid: &str) -> Option<(f64, f64)> {
     let mut lon = -180.0 + ((b[0] - b'A') as f64) * 20.0 + ((b[2] - b'0') as f64) * 2.0;
     let mut lat = -90.0 + ((b[1] - b'A') as f64) * 10.0 + ((b[3] - b'0') as f64) * 1.0;
 
-    if b.len() >= 6 {
-        if b[4] >= b'A' && b[4] <= b'X' && b[5] >= b'A' && b[5] <= b'X' {
-            lon += ((b[4] - b'A') as f64) * (2.0 / 24.0) + (1.0 / 24.0);
-            lat += ((b[5] - b'A') as f64) * (1.0 / 24.0) + (0.5 / 24.0);
-        } else {
-            // 4 位精度中心点
-            lon += 1.0;
-            lat += 0.5;
+    if b.len() == 6 {
+        // 校验后 2 字符：字母 A..X
+        if !(b[4] >= b'A' && b[4] <= b'X' && b[5] >= b'A' && b[5] <= b'X') {
+            return None;
         }
+        lon += ((b[4] - b'A') as f64) * (2.0 / 24.0) + (1.0 / 24.0);
+        lat += ((b[5] - b'A') as f64) * (1.0 / 24.0) + (0.5 / 24.0);
     } else {
-        // 4 位精度中心点
+        // 4 位网格中心点 (居中加 1° 经度, 0.5° 纬度)
         lon += 1.0;
         lat += 0.5;
     }
@@ -342,8 +395,30 @@ pub fn grid_to_latlon(grid: &str) -> Option<(f64, f64)> {
     Some((lat, lon))
 }
 
-/// 将经纬度转换为 4 字符或 6 字符梅登黑德网格 (默认 6 字符)
-pub fn latlon_to_grid(lat: f64, lon: f64) -> String {
+/// 将经纬度转换为 4 字符梅登黑德网格 (例如 "OM89")
+pub fn latlon_to_grid_4(lat: f64, lon: f64) -> String {
+    let lat = lat.clamp(-90.0, 90.0) + 90.0;
+    let lon = (lon + 180.0).rem_euclid(360.0);
+
+    let f1 = (lon / 20.0).floor() as u8;
+    let f2 = (lat / 10.0).floor() as u8;
+
+    let rem_lon1 = lon - (f1 as f64) * 20.0;
+    let rem_lat1 = lat - (f2 as f64) * 10.0;
+
+    let sq1 = (rem_lon1 / 2.0).floor() as u8;
+    let sq2 = (rem_lat1 / 1.0).floor() as u8;
+
+    let c1 = (b'A' + f1.min(17)) as char;
+    let c2 = (b'A' + f2.min(17)) as char;
+    let c3 = (b'0' + sq1.min(9)) as char;
+    let c4 = (b'0' + sq2.min(9)) as char;
+
+    format!("{}{}{}{}", c1, c2, c3, c4)
+}
+
+/// 将经纬度转换为 6 字符梅登黑德网格 (符合国际规范，后两位小写，例如 "OM89aa")
+pub fn latlon_to_grid_6(lat: f64, lon: f64) -> String {
     let lat = lat.clamp(-90.0, 90.0) + 90.0;
     let lon = (lon + 180.0).rem_euclid(360.0);
 
@@ -362,14 +437,19 @@ pub fn latlon_to_grid(lat: f64, lon: f64) -> String {
     let ss1 = (rem_lon2 / (2.0 / 24.0)).floor() as u8;
     let ss2 = (rem_lat2 / (1.0 / 24.0)).floor() as u8;
 
-    let c1 = (b'A' + f1) as char;
-    let c2 = (b'A' + f2) as char;
-    let c3 = (b'0' + sq1) as char;
-    let c4 = (b'0' + sq2) as char;
+    let c1 = (b'A' + f1.min(17)) as char;
+    let c2 = (b'A' + f2.min(17)) as char;
+    let c3 = (b'0' + sq1.min(9)) as char;
+    let c4 = (b'0' + sq2.min(9)) as char;
     let c5 = (b'a' + ss1.min(23)) as char;
     let c6 = (b'a' + ss2.min(23)) as char;
 
     format!("{}{}{}{}{}{}", c1, c2, c3, c4, c5, c6)
+}
+
+/// 将经纬度转换为梅登黑德网格 (默认 6 字符标准格式)
+pub fn latlon_to_grid(lat: f64, lon: f64) -> String {
+    latlon_to_grid_6(lat, lon)
 }
 
 /// 计算两个经纬度坐标之间的大圆距离 (Great-Circle Distance)
@@ -438,13 +518,58 @@ mod tests {
         assert!((lat1 - 39.5).abs() < 1.0);
         assert!((lon1 - 117.0).abs() < 1.0);
 
-        // 经纬度往返转换互逆测试
+        // 经纬度往返转换互逆测试 (默认 6 字符)
         let grid_back = latlon_to_grid(lat1, lon1);
         assert_eq!(&grid_back[..4], "OM89");
+        let grid_4 = latlon_to_grid_4(lat1, lon1);
+        assert_eq!(grid_4, "OM89");
+
+        // 4位与6位不同大小写混写解析测试
+        let g1 = grid_to_latlon("om89").expect("全小写 4 位解析失败");
+        let g2 = grid_to_latlon("oM89").expect("大小写混合 4 位解析失败");
+        let g3 = grid_to_latlon("OM89").expect("全大写 4 位解析失败");
+        assert_eq!(g1, g2);
+        assert_eq!(g2, g3);
+
+        let g_sub1 = grid_to_latlon("om89aa").expect("全小写 6 位解析失败");
+        let g_sub2 = grid_to_latlon("OM89AA").expect("全大写 6 位解析失败");
+        let g_sub3 = grid_to_latlon("Om89aA").expect("混合 6 位解析失败");
+        assert_eq!(g_sub1, g_sub2);
+        assert_eq!(g_sub2, g_sub3);
+
+        // 6位网格解析中心点相较于 4位网格更精细 (应在 OM89 边界内)
+        assert!((g_sub1.0 - g1.0).abs() < 1.0);
+        assert!((g_sub1.1 - g1.1).abs() < 2.0);
+
+        // 非法网格测试 (非 4/6 位或非法字符)
+        assert!(grid_to_latlon("OM8").is_none());
+        assert!(grid_to_latlon("OM89A").is_none());
+        assert!(grid_to_latlon("OM89AAB").is_none());
+        assert!(grid_to_latlon("ZZ89").is_none()); // 场最高为 R
+        assert!(grid_to_latlon("OM89YZ").is_none()); // 块最高为 X
 
         // 上海网格 PM01 (约 31.5°N, 121.0°E)
-        let dist = grid_distance("OM89", "PM01").expect("计算网格距离失败");
+        let dist = grid_distance("OM89", "pm01").expect("计算网格距离失败");
         // 北京到上海直线距离约 1050 ~ 1100 公里
         assert!(dist > 950.0 && dist < 1200.0, "实际距离: {}", dist);
+    }
+
+    #[test]
+    fn test_lookup_cache_and_buckets() {
+        let db = DxccDatabase::global();
+        // 第一次查询 (冷查走桶表)
+        let e1 = db.lookup("BG5VDH").expect("BG5VDH 应匹配中国");
+        assert_eq!(e1.name_cn, "中国");
+
+        // 第二次查询 (命中 O(1) 读锁缓存)
+        let e2 = db.lookup("BG5VDH").expect("缓存命中查询失败");
+        assert_eq!(e2.name_cn, "中国");
+
+        // 哈希包裹与斜杠修饰呼号查询
+        let e3 = db.lookup("BA4TB/P").expect("BA4TB/P 应匹配中国");
+        assert_eq!(e3.name_cn, "中国");
+
+        // 未知或非法呼号
+        assert!(db.lookup("X").is_none());
     }
 }

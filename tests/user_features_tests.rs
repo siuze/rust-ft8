@@ -116,6 +116,7 @@ fn test_streaming_decoder_with_callback() {
     let chunk_size = 1920; // 160ms
     let mut early_count = 0;
     let mut final_count = 0;
+    let mut finished_seen = false;
 
     for chunk in audio.chunks(chunk_size) {
         receiver.feed_chunk_with_callback(chunk, |ev| match ev {
@@ -133,11 +134,16 @@ fn test_streaming_decoder_with_callback() {
                 println!("[流式 {:.2}s] 全时隙扫尾完成! 共 {} 条信号", time_sec, all_signals.len());
                 final_count += all_signals.len();
             }
+            StreamDecodedEvent::DecodeFinished { total_signals, audio_duration_sec, is_last_chunk } => {
+                finished_seen = true;
+                println!("[流式 {:.2}s] 本轮解码结束通知: 总计 {} 条信号 (最后一帧={})", audio_duration_sec, total_signals, is_last_chunk);
+            }
         });
     }
 
     assert!(early_count > 0, "流式提前解码应至少解出 1 批信号");
     assert!(final_count > 0, "流式全时隙扫尾应产出信号");
+    assert!(finished_seen, "流式解码器必须触发 DecodeFinished 事件");
 }
 
 #[test]
@@ -162,15 +168,26 @@ fn test_dxcc_translation_and_distance() {
     assert_eq!(country_en_to_cn("Germany"), "德国");
     assert_eq!(country_en_to_cn("United States"), "美国");
 
-    // 3. 网格与经纬度互转
+    // 3. 网格与经纬度互转 (支持 4位、6位以及大小写完全混写)
     let (lat_bj, lon_bj) = grid_to_latlon("OM89").expect("OM89 解析失败");
     assert!((lat_bj - 39.5).abs() < 1.0);
     assert!((lon_bj - 117.0).abs() < 1.0);
-    let grid_back = latlon_to_grid(lat_bj, lon_bj);
-    assert_eq!(&grid_back[..4], "OM89");
+
+    // 大小写混合测试
+    let (lat_lower, lon_lower) = grid_to_latlon("om89").expect("小写 om89 解析失败");
+    assert_eq!((lat_bj, lon_bj), (lat_lower, lon_lower));
+
+    let (lat_6, lon_6) = grid_to_latlon("Om89aA").expect("大小写混合 6 位解析失败");
+    assert!((lat_6 - lat_bj).abs() < 1.0);
+    assert!((lon_6 - lon_bj).abs() < 1.0);
+
+    let grid_back_4 = rust_ft8::dxcc::latlon_to_grid_4(lat_bj, lon_bj);
+    assert_eq!(grid_back_4, "OM89");
+    let grid_back_6 = latlon_to_grid(lat_bj, lon_bj);
+    assert_eq!(&grid_back_6[..4], "OM89");
 
     // 4. 大圆距离计算 (北京 OM89 到 上海 PM01)
-    let (lat_sh, lon_sh) = grid_to_latlon("PM01").expect("PM01 解析失败");
+    let (lat_sh, lon_sh) = grid_to_latlon("pm01").expect("pm01 解析失败");
     let dist_latlon = great_circle_distance(lat_bj, lon_bj, lat_sh, lon_sh);
     let dist_grid = grid_distance("OM89", "PM01").expect("网格距离计算失败");
     assert!((dist_latlon - dist_grid).abs() < 1e-4);

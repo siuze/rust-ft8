@@ -86,6 +86,12 @@ fn main() {
                         );
                     }
                 }
+                StreamEvent::DecodeFinished { total_signals, audio_duration_sec, is_last_chunk } => {
+                    println!(
+                        "[{:5.2}s] [事件 4: 本轮解码完全结束] 累计音频={:.2}s, 最终检出={} 条信号, 最后一帧标记={}",
+                        stream_time, audio_duration_sec, total_signals, is_last_chunk
+                    );
+                }
             }
         }
     }

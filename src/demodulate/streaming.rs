@@ -30,6 +30,12 @@ pub enum StreamEvent {
     EarlyDecoded(Vec<DecodedSignal>),
     /// 阶段 3 (t ≈ 12.64s ~ 12.8s)：发射全部结束，微弱信号消减扫尾完成，输出全量最终结果 (比 15s 提前 2.2 秒！)
     CycleCompleted(Vec<DecodedSignal>),
+    /// 阶段 4：本轮时隙解码完全结束通知 (含提前结束/自然结束标记)
+    DecodeFinished {
+        total_signals: usize,
+        audio_duration_sec: f32,
+        is_last_chunk: bool,
+    },
 }
 
 /// 完整结构化流式接收器事件 (含 DT 真实窗口基准校正与 9 项完整结构化字段)
@@ -50,6 +56,12 @@ pub enum StreamDecodedEvent {
         all_signals: Vec<Ft8DecodedMessage>,
         time_sec: f32,
     },
+    /// 阶段 4：本轮时隙解码完全结束通知 (所有 Pass 与消减计算均已完成，可安全转入下一时隙)
+    DecodeFinished {
+        total_signals: usize,
+        audio_duration_sec: f32,
+        is_last_chunk: bool,
+    },
 }
 
 /// 流式边收边解 FT8 接收机
@@ -61,6 +73,8 @@ pub struct StreamingFt8Receiver {
     preamble_fired: bool,
     early_fired: bool,
     cycle_fired: bool,
+    finished_fired: bool,
+    last_completed_count: usize,
     early_results: Vec<DecodedSignal>,
     window_start_offset: f32,
 }
@@ -87,9 +101,21 @@ impl StreamingFt8Receiver {
             preamble_fired: false,
             early_fired: false,
             cycle_fired: false,
+            finished_fired: false,
+            last_completed_count: 0,
             early_results: Vec::new(),
             window_start_offset,
         }
+    }
+
+    /// 查询当前时隙周期是否已经完成了最终解码
+    pub fn is_cycle_finished(&self) -> bool {
+        self.finished_fired
+    }
+
+    /// 获取当前时隙周期已解出的最新信号总数
+    pub fn last_signals_count(&self) -> usize {
+        self.last_completed_count
     }
 
     /// 重置周期状态机 (通常在 15.0 秒时隙交界处调用)
@@ -99,11 +125,17 @@ impl StreamingFt8Receiver {
         self.preamble_fired = false;
         self.early_fired = false;
         self.cycle_fired = false;
+        self.finished_fired = false;
+        self.last_completed_count = 0;
         self.early_results.clear();
     }
 
-    /// 流式喂入音频切片，返回原始事件列表 (保持向后兼容)
-    pub fn feed_chunk(&mut self, chunk: &[f32]) -> Vec<StreamEvent> {
+    /// 带有 is_last (是否为本时隙最后一包音频) 标志的流式音频喂入接口
+    ///
+    /// # 参数
+    /// - `chunk`: 采样率 12000 Hz 的单声道 f32 音频切片
+    /// - `is_last`: 若为 true，代表本轮音频流已结束，接收机将立即对已有音频执行扫尾解码并发出 DecodeFinished 通知
+    pub fn feed_chunk_ext(&mut self, chunk: &[f32], is_last: bool) -> Vec<StreamEvent> {
         let mut events = Vec::new();
         let chunk_len = chunk.len();
 
@@ -128,7 +160,7 @@ impl StreamingFt8Receiver {
         }
 
         // 里程碑 2：提前解码时机 (t >= 11.52s, 即 138240 采样点，第 72 符号到达)
-        if !self.early_fired && self.samples_in_cycle >= 138240 {
+        if !self.early_fired && self.samples_in_cycle >= 138240 && !is_last {
             self.early_fired = true;
             let mut early_cfg = self.config.clone();
             early_cfg.passes = 1;
@@ -139,11 +171,30 @@ impl StreamingFt8Receiver {
             }
         }
 
-        // 里程碑 3：信号发射全部结束时刻 (t >= 12.64s, 即 151680 采样点，第 79 符号到达)
-        if !self.cycle_fired && self.samples_in_cycle >= 151680 {
+        let current_time_sec = (self.samples_in_cycle as f32) / 12000.0;
+
+        // 里程碑 3：信号发射全部结束时刻 (t >= 12.64s, 即 151680 采样点) 或 主动标记为最后一帧
+        if !self.cycle_fired && (self.samples_in_cycle >= 151680 || is_last) {
             self.cycle_fired = true;
             let final_decodes = self.pipeline.decode(&self.audio_buffer, &self.config);
+            self.last_completed_count = final_decodes.len();
             events.push(StreamEvent::CycleCompleted(final_decodes));
+
+            // 里程碑 4：本轮解码完全结束通知
+            self.finished_fired = true;
+            events.push(StreamEvent::DecodeFinished {
+                total_signals: self.last_completed_count,
+                audio_duration_sec: current_time_sec,
+                is_last_chunk: is_last,
+            });
+        } else if is_last && !self.finished_fired {
+            // 若此前已触发过 CycleCompleted，但现在收到了最后一帧标记
+            self.finished_fired = true;
+            events.push(StreamEvent::DecodeFinished {
+                total_signals: self.last_completed_count,
+                audio_duration_sec: current_time_sec,
+                is_last_chunk: true,
+            });
         }
 
         // 周期超时自动轮转 (15.0s, 即 180,000 点)
@@ -154,9 +205,19 @@ impl StreamingFt8Receiver {
         events
     }
 
-    /// 流式喂入音频切片，返回带真实窗口 DT 校正与 9 项完整结构化字段的事件列表
-    pub fn feed_chunk_structured(&mut self, chunk: &[f32]) -> Vec<StreamDecodedEvent> {
-        let raw_events = self.feed_chunk(chunk);
+    /// 流式喂入音频切片，返回原始事件列表 (保持向后兼容)
+    pub fn feed_chunk(&mut self, chunk: &[f32]) -> Vec<StreamEvent> {
+        self.feed_chunk_ext(chunk, false)
+    }
+
+    /// 流式喂入最后一包音频切片，并强制触发扫尾解码与结束通知
+    pub fn feed_chunk_last(&mut self, chunk: &[f32]) -> Vec<StreamEvent> {
+        self.feed_chunk_ext(chunk, true)
+    }
+
+    /// 带有 is_last 标志的结构化流式喂流接口
+    pub fn feed_chunk_structured_ext(&mut self, chunk: &[f32], is_last: bool) -> Vec<StreamDecodedEvent> {
+        let raw_events = self.feed_chunk_ext(chunk, is_last);
         let current_time_sec = (self.samples_in_cycle as f32) / 12000.0;
         let offset = self.window_start_offset;
 
@@ -189,11 +250,36 @@ impl StreamingFt8Receiver {
                         time_sec: current_time_sec,
                     }
                 }
+                StreamEvent::DecodeFinished {
+                    total_signals,
+                    audio_duration_sec,
+                    is_last_chunk,
+                } => StreamDecodedEvent::DecodeFinished {
+                    total_signals,
+                    audio_duration_sec,
+                    is_last_chunk,
+                },
             })
             .collect()
     }
 
-    /// 支持用户自定义回调句柄 (Callback) 的流式喂流接口
+    /// 流式喂入音频切片，返回带真实窗口 DT 校正与 9 项完整结构化字段的事件列表 (默认 is_last=false)
+    pub fn feed_chunk_structured(&mut self, chunk: &[f32]) -> Vec<StreamDecodedEvent> {
+        self.feed_chunk_structured_ext(chunk, false)
+    }
+
+    /// 支持带 is_last 标志和自定义回调句柄 (Callback) 的流式喂流接口
+    pub fn feed_chunk_with_callback_ext<F>(&mut self, chunk: &[f32], is_last: bool, mut callback: F)
+    where
+        F: FnMut(StreamDecodedEvent),
+    {
+        let events = self.feed_chunk_structured_ext(chunk, is_last);
+        for ev in events {
+            callback(ev);
+        }
+    }
+
+    /// 支持用户自定义回调句柄 (Callback) 的流式喂流接口 (默认 is_last=false)
     ///
     /// # 示例
     /// ```no_run
@@ -210,18 +296,31 @@ impl StreamingFt8Receiver {
     ///         StreamDecodedEvent::CycleCompleted { all_signals, .. } => {
     ///             println!("全量完成 {} 条信号", all_signals.len());
     ///         }
+    ///         StreamDecodedEvent::DecodeFinished { total_signals, is_last_chunk, .. } => {
+    ///             println!("解码结束通知：共解出 {} 条信号 (最后一帧={})", total_signals, is_last_chunk);
+    ///         }
     ///         _ => {}
     ///     }
     /// });
     /// ```
-    pub fn feed_chunk_with_callback<F>(&mut self, chunk: &[f32], mut callback: F)
+    pub fn feed_chunk_with_callback<F>(&mut self, chunk: &[f32], callback: F)
     where
         F: FnMut(StreamDecodedEvent),
     {
-        let events = self.feed_chunk_structured(chunk);
-        for ev in events {
-            callback(ev);
-        }
+        self.feed_chunk_with_callback_ext(chunk, false, callback);
+    }
+
+    /// 主动强制结束本轮时隙解码流程 (即使尚未输入完整 15 秒音频)，返回事件列表
+    pub fn finish(&mut self) -> Vec<StreamDecodedEvent> {
+        self.feed_chunk_structured_ext(&[], true)
+    }
+
+    /// 主动强制结束本轮时隙解码流程并通过回调输出事件
+    pub fn finish_with_callback<F>(&mut self, callback: F)
+    where
+        F: FnMut(StreamDecodedEvent),
+    {
+        self.feed_chunk_with_callback_ext(&[], true, callback);
     }
 
     /// 快速粗扫描当前音频流中的活跃载波频点

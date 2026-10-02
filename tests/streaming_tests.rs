@@ -70,6 +70,12 @@ fn test_streaming_early_decoding_websdr_test1() {
                         signals.len()
                     );
                 }
+                StreamEvent::DecodeFinished { total_signals, audio_duration_sec, is_last_chunk } => {
+                    println!(
+                        "[{:5.2}s] [事件 4: 本轮解码完全结束] 录制时长={:.2}s, 总解出={} 条信号, 主动标记最后一帧={}",
+                        current_time_sec, audio_duration_sec, total_signals, is_last_chunk
+                    );
+                }
             }
         }
 
@@ -86,6 +92,38 @@ fn test_streaming_early_decoding_websdr_test1() {
     assert!(preamble_seen, "必须成功捕获前导码");
     assert!(early_decodes.len() >= 10, "提前解码期至少应解出 10 条强信号");
     assert!(final_decodes.len() >= 16, "全量输出至少应解出 16 条信号");
+}
+
+#[test]
+fn test_streaming_finish_with_last_chunk() {
+    let wav_path = "reference/ft8_lib/test/wav/websdr_test1.wav";
+    let (audio, _) = read_wav_file(wav_path).expect("读取 WAV 音频失败");
+
+    let mut receiver = StreamingFt8Receiver::with_window_offset(DecoderConfig::default(), -0.9);
+
+    // 仅模拟录制了前 13.0 秒 (156000 采样点)
+    let slice_len = 156000.min(audio.len());
+    let mut got_finish = false;
+    let mut decoded_count = 0;
+
+    // 传入 chunk，并且显式标记 is_last = true
+    receiver.feed_chunk_with_callback_ext(&audio[..slice_len], true, |ev| {
+        match ev {
+            rust_ft8::demodulate::StreamDecodedEvent::CycleCompleted { all_signals, .. } => {
+                decoded_count = all_signals.len();
+            }
+            rust_ft8::demodulate::StreamDecodedEvent::DecodeFinished { total_signals, is_last_chunk, .. } => {
+                got_finish = true;
+                assert!(is_last_chunk);
+                assert_eq!(total_signals, decoded_count);
+            }
+            _ => {}
+        }
+    });
+
+    assert!(got_finish, "必须收到 DecodeFinished 事件");
+    assert!(decoded_count >= 16, "提前结束解码应能顺利解出至少 16 条信号");
+    assert!(receiver.is_cycle_finished(), "接收器状态必须已完成");
 }
 
 fn active_freqs_summary(freqs: &[f32]) -> Vec<u32> {
