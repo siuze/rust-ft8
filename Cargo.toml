@@ -22,3 +22,10 @@ path = "src/bin/ft8_decode.rs"
 [[bin]]
 name = "ft8_encode"
 path = "src/bin/ft8_encode.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+

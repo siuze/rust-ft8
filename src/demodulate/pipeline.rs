@@ -6,6 +6,7 @@
 //! 3. 多符号相干 LLR 提取与混合 LDPC 译码
 //! 4. 强信号时域重构与残差消减，激活多 Pass 弱信号深挖
 
+use rayon::prelude::*;
 use super::baseline::BaselineEstimator;
 use super::downsample::{Downsampler, NMAX};
 use super::extract::{DecodedSignal, SymbolExtractor};
@@ -30,7 +31,7 @@ impl Default for DecoderConfig {
         Self {
             nfa: 100.0,
             nfb: 3500.0,
-            passes: 3,
+            passes: 2,
             sync_min: 1.4,
         }
     }
@@ -56,6 +57,12 @@ impl Ft8Pipeline {
         }
     }
 
+    /// 获取粗同步搜索器引用
+    pub fn searcher(&self) -> &SyncSearcher {
+        &self.searcher
+    }
+
+
     /// 对 15 秒（12000 Hz，约 180,000 采样点）音频数据执行 3-Pass 消减解调
     pub fn decode(&self, audio: &[f32], config: &DecoderConfig) -> Vec<DecodedSignal> {
         let mut working_audio = vec![0.0f32; NMAX];
@@ -78,6 +85,7 @@ impl Ft8Pipeline {
         let mut decoded_all: Vec<DecodedSignal> = Vec::new();
 
         for ipass in 1..=config.passes {
+            let t_pass_start = std::time::Instant::now();
             let sync_thresh = match ipass {
                 1 => config.sync_min + 0.2, // 第 1 轮门限略高，优先锁定强信号
                 2 => config.sync_min,       // 第 2 轮标准门限
@@ -85,61 +93,99 @@ impl Ft8Pipeline {
             };
 
             // 1. 在当前残差音频中搜索候选信号
+            let t_find = std::time::Instant::now();
             let candidates = self.searcher.find_candidates(
                 &working_audio,
                 config.nfa,
                 config.nfb,
                 sync_thresh,
-                400,
+                300,
             );
+            let d_find = t_find.elapsed().as_secs_f32();
 
             if candidates.is_empty() {
-                continue;
+                break;
             }
 
             // 2. 计算当前残差音频的 192000 点全长 FFT
+            let t_fft = std::time::Instant::now();
             let long_fft = self.downsampler.compute_long_fft(&working_audio);
+            let d_fft = t_fft.elapsed().as_secs_f32();
 
-            let mut pass_new_decodes = 0;
+            // 3. 候选信号并行提取与译码 (Rayon 多核并行，压满 A55 核心)
+            let t_dec = std::time::Instant::now();
+            let decoded_candidates: Vec<(DecodedSignal, isize)> = candidates
+                .par_iter()
+                .filter_map(|cand| {
+                    let cd0_init = self.downsampler.downsample(&long_fft, cand.freq);
+                    let (_ibest_init, delf, _) = self.searcher.fine_sync(&cd0_init, cand.dt);
+                    let (cd0, f1) = if delf.abs() < 0.05 {
+                        (cd0_init, cand.freq)
+                    } else {
+                        let f1 = cand.freq + delf;
+                        let cd0 = self.downsampler.downsample(&long_fft, f1);
+                        (cd0, f1)
+                    };
+                    let (ibest, _, sync_pow) = self.searcher.fine_sync(&cd0, cand.dt);
+                    let xbase = baseline.get_xbase(f1);
+                    self.extractor
+                        .extract_and_decode(&cd0, ibest, f1, sync_pow, xbase)
+                        .map(|sig| (sig, ibest))
+                })
+                .collect();
+            let d_dec = t_dec.elapsed().as_secs_f32();
 
-            // 3. 逐个候选解调
-            for cand in &candidates {
-                // 提取 200 Hz 基带信号
-                let cd0_init = self.downsampler.downsample(&long_fft, cand.freq);
+            // 4. 提取本轮新解出信号
+            let mut new_signals = Vec::new();
+            for (sig, ibest) in decoded_candidates {
+                let is_dup = decoded_all.iter().any(|d| d.message == sig.message);
+                if !is_dup {
+                    decoded_all.push(sig.clone());
+                    new_signals.push((sig, ibest));
+                }
+            }
+            let pass_new_decodes = new_signals.len();
 
-                // 精细对齐时间与频偏 (delf)
-                let (_ibest_init, delf, _) = self.searcher.fine_sync(&cd0_init, cand.dt);
-                let f1 = cand.freq + delf;
+            // 若本轮为最后一轮或新解出信号为 0，无需再重构波形进行消减
+            let is_last_pass = ipass >= config.passes || pass_new_decodes == 0 || (ipass >= 2 && pass_new_decodes <= 1);
 
-                // 关键对齐：使用修正后的精确中心频率 f1 重新切片基带，确保 8 音调严格正交对齐 FFT 频点 (对标 WSJT-X ft8b.f90 L140)
-                let cd0 = self.downsampler.downsample(&long_fft, f1);
-                let (ibest, _, sync_pow) = self.searcher.fine_sync(&cd0, cand.dt);
+            let t_sub = std::time::Instant::now();
+            if !is_last_pass && !new_signals.is_empty() {
+                let sub_waves: Vec<(isize, Vec<f32>)> = new_signals
+                    .par_iter()
+                    .map_init(
+                        || self.subtracter.create_buffers(),
+                        |bufs, (sig, ibest)| {
+                            self.subtracter.reconstruct_waveform_with_buf(
+                                &sig.tones,
+                                sig.freq,
+                                *ibest,
+                                &working_audio,
+                                bufs,
+                            )
+                        },
+                    )
+                    .collect();
 
-                // 计算当前载频处的物理噪声基线 xbase (对标 ft8_decode.f90 L201)
-                let xbase = baseline.get_xbase(f1);
-
-                // 提取多符号能量并送入译码器
-                if let Some(sig) = self.extractor.extract_and_decode(&cd0, ibest, f1, sync_pow, xbase) {
-                    // 确认消息是否新出现 (对标 WSJT-X ft8_decode.f90: 仅按消息文本去重，支持近邻与同频弱信号检出)
-                    let is_dup = decoded_all.iter().any(|d| d.message == sig.message);
-
-                    if !is_dup {
-                        decoded_all.push(sig.clone());
-                        pass_new_decodes += 1;
-
-                        // 从时域残差音频中精确扣除该信号 (基于 200 Hz 精确采样点 ibest)
-                        self.subtracter.subtract_signal(
-                            &mut working_audio,
-                            &sig.tones,
-                            sig.freq,
-                            ibest,
-                        );
+                // 在主线程统一扣除各路信号
+                for (nstart, wave) in sub_waves {
+                    for (i, &rec) in wave.iter().enumerate() {
+                        let j = nstart + (i as isize);
+                        if j >= 0 && (j as usize) < working_audio.len() {
+                            working_audio[j as usize] -= rec;
+                        }
                     }
                 }
             }
+            let d_sub = t_sub.elapsed().as_secs_f32();
+            let d_total = t_pass_start.elapsed().as_secs_f32();
 
-            // 若本轮未新解出任何信号，提前终止消减循环
-            if pass_new_decodes == 0 {
+            eprintln!(
+                "Pass {}: 总耗时={:.2}s | 搜候选={:.2}s ({}个) | 192kFFT={:.2}s | 并行译码={:.2}s (解出{}条) | 消减={:.2}s",
+                ipass, d_total, d_find, candidates.len(), d_fft, d_dec, pass_new_decodes, d_sub
+            );
+
+            if is_last_pass {
                 break;
             }
         }

@@ -4,6 +4,7 @@
 //! 计算时频相关二维谱，经 40% 分位数基线归一化后，检出候选信号的时延 (DT)、频偏 (DF) 及同步度量 (Sync)。
 
 use num_complex::Complex32;
+use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner};
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -76,28 +77,24 @@ impl SyncSearcher {
         let df = 12000.0 / (NFFT1 as f32); // 3.125 Hz
         let tstep = (NSTEP as f32) / 12000.0; // 0.040s
 
-        // 1. 滑动计算 NHSYM = 372 个 3840 点 FFT 功率谱
+        // 1. 滑动计算 NHSYM = 372 个 3840 点 FFT 功率谱 (Rayon 多核并行)
         let mut s = vec![vec![0.0f32; NH1]; NHSYM];
-        let mut buf = vec![Complex32::new(0.0, 0.0); NFFT1];
         let fac = 1.0 / 300.0;
 
-        for j in 0..NHSYM {
+        s.par_iter_mut().enumerate().for_each(|(j, s_row)| {
             let ia = j * NSTEP;
             let ib = (ia + NSPS).min(audio.len());
+            let mut buf = vec![Complex32::new(0.0, 0.0); NFFT1];
             for k in 0..NFFT1 {
                 if k < (ib - ia) {
                     buf[k] = Complex32::new(fac * audio[ia + k], 0.0);
-                } else {
-                    buf[k] = Complex32::new(0.0, 0.0);
                 }
             }
-
             self.fft_3840.process(&mut buf);
-
             for i in 0..NH1 {
-                s[j][i] = buf[i].norm_sqr();
+                s_row[i] = buf[i].norm_sqr();
             }
-        }
+        });
 
         let ia = ((nfa / df).round() as usize).max(1);
         let ib = ((nfb / df).round() as usize).min(NH1 - 16);
@@ -110,97 +107,106 @@ impl SyncSearcher {
         let jstrt = (0.5 / tstep).round() as isize; // 12
 
         let num_bins = ib - ia + 1;
-        let mut red = vec![0.0f32; num_bins];
-        let mut jpeak = vec![0isize; num_bins];
-        let mut red2 = vec![0.0f32; num_bins];
-        let mut jpeak2 = vec![0isize; num_bins];
-
         let mlag = 10isize;
         let mlag2 = JZ;
 
-        // 2. 搜索 Costas 图案相关峰
-        for (bin_idx, i) in (ia..=ib).enumerate() {
-            let mut sync_row = vec![0.0f32; (2 * JZ + 1) as usize];
+        // 2. 搜索 Costas 图案相关峰 (Rayon 多核并行 + 栈上固定数组消除 1088 次堆分配)
+        let results: Vec<(f32, isize, f32, isize)> = (0..num_bins)
+            .into_par_iter()
+            .map(|bin_idx| {
+                let i = ia + bin_idx;
+                let mut sync_row = [0.0f32; (2 * JZ + 1) as usize];
 
-            for j in -JZ..=JZ {
-                let mut ta = 0.0f32;
-                let mut tb = 0.0f32;
-                let mut tc = 0.0f32;
-                let mut t0a = 0.0f32;
-                let mut t0b = 0.0f32;
-                let mut t0c = 0.0f32;
+                for j in -JZ..=JZ {
+                    let mut ta = 0.0f32;
+                    let mut tb = 0.0f32;
+                    let mut tc = 0.0f32;
+                    let mut t0a = 0.0f32;
+                    let mut t0b = 0.0f32;
+                    let mut t0c = 0.0f32;
 
-                for n in 0..7 {
-                    let tone_offset = nfos * (COSTAS_PATTERN[n] as usize);
-                    let m = j + jstrt + (nssy * n) as isize;
+                    for n in 0..7 {
+                        let tone_offset = nfos * (COSTAS_PATTERN[n] as usize);
+                        let m = j + jstrt + (nssy * n) as isize;
 
-                    if m >= 0 && (m as usize) < NHSYM {
-                        let mu = m as usize;
-                        ta += s[mu][i + tone_offset];
-                        for t in 0..7 {
-                            t0a += s[mu][i + nfos * t];
+                        if m >= 0 && (m as usize) < NHSYM {
+                            let mu = m as usize;
+                            ta += s[mu][i + tone_offset];
+                            for t in 0..7 {
+                                t0a += s[mu][i + nfos * t];
+                            }
+                        }
+
+                        let mb = m + (nssy * 36) as isize;
+                        if mb >= 0 && (mb as usize) < NHSYM {
+                            let mbu = mb as usize;
+                            tb += s[mbu][i + tone_offset];
+                            for t in 0..7 {
+                                t0b += s[mbu][i + nfos * t];
+                            }
+                        }
+
+                        let mc = m + (nssy * 72) as isize;
+                        if mc >= 0 && (mc as usize) < NHSYM {
+                            let mcu = mc as usize;
+                            tc += s[mcu][i + tone_offset];
+                            for t in 0..7 {
+                                t0c += s[mcu][i + nfos * t];
+                            }
                         }
                     }
 
-                    let mb = m + (nssy * 36) as isize;
-                    if mb >= 0 && (mb as usize) < NHSYM {
-                        let mbu = mb as usize;
-                        tb += s[mbu][i + tone_offset];
-                        for t in 0..7 {
-                            t0b += s[mbu][i + nfos * t];
-                        }
+                    // 3 个 Costas 块相关
+                    let t_abc = ta + tb + tc;
+                    let t0_abc = (t0a + t0b + t0c - t_abc) / 6.0;
+                    let sync_abc = if t0_abc > 1e-6 { t_abc / t0_abc } else { 0.0 };
+
+                    // 2 个 Costas 块相关 (B + C 块，适应延迟开始的发射)
+                    let t_bc = tb + tc;
+                    let t0_bc = (t0b + t0c - t_bc) / 6.0;
+                    let sync_bc = if t0_bc > 1e-6 { t_bc / t0_bc } else { 0.0 };
+
+                    let val = sync_abc.max(sync_bc);
+                    let row_idx = (j + JZ) as usize;
+                    sync_row[row_idx] = val;
+                }
+
+                // 在 [-10, 10] 范围找峰值
+                let mut max1 = 0.0f32;
+                let mut jp1 = 0isize;
+                for j in -mlag..=mlag {
+                    let v = sync_row[(j + JZ) as usize];
+                    if v > max1 {
+                        max1 = v;
+                        jp1 = j;
                     }
+                }
 
-                    let mc = m + (nssy * 72) as isize;
-                    if mc >= 0 && (mc as usize) < NHSYM {
-                        let mcu = mc as usize;
-                        tc += s[mcu][i + tone_offset];
-                        for t in 0..7 {
-                            t0c += s[mcu][i + nfos * t];
-                        }
+                // 在 [-62, 62] 范围找峰值
+                let mut max2 = 0.0f32;
+                let mut jp2 = 0isize;
+                for j in -mlag2..=mlag2 {
+                    let v = sync_row[(j + JZ) as usize];
+                    if v > max2 {
+                        max2 = v;
+                        jp2 = j;
                     }
                 }
 
-                // 3 个 Costas 块相关
-                let t_abc = ta + tb + tc;
-                let t0_abc = (t0a + t0b + t0c - t_abc) / 6.0;
-                let sync_abc = if t0_abc > 1e-6 { t_abc / t0_abc } else { 0.0 };
+                (max1, jp1, max2, jp2)
+            })
+            .collect();
 
-                // 2 个 Costas 块相关 (B + C 块，适应延迟开始的发射)
-                let t_bc = tb + tc;
-                let t0_bc = (t0b + t0c - t_bc) / 6.0;
-                let sync_bc = if t0_bc > 1e-6 { t_bc / t0_bc } else { 0.0 };
+        let mut red = Vec::with_capacity(num_bins);
+        let mut jpeak = Vec::with_capacity(num_bins);
+        let mut red2 = Vec::with_capacity(num_bins);
+        let mut jpeak2 = Vec::with_capacity(num_bins);
 
-                let val = sync_abc.max(sync_bc);
-                let row_idx = (j + JZ) as usize;
-                sync_row[row_idx] = val;
-            }
-
-            // 在 [-10, 10] 范围找峰值
-            let mut max1 = 0.0f32;
-            let mut jp1 = 0isize;
-            for j in -mlag..=mlag {
-                let v = sync_row[(j + JZ) as usize];
-                if v > max1 {
-                    max1 = v;
-                    jp1 = j;
-                }
-            }
-            red[bin_idx] = max1;
-            jpeak[bin_idx] = jp1;
-
-            // 在 [-62, 62] 范围找峰值
-            let mut max2 = 0.0f32;
-            let mut jp2 = 0isize;
-            for j in -mlag2..=mlag2 {
-                let v = sync_row[(j + JZ) as usize];
-                if v > max2 {
-                    max2 = v;
-                    jp2 = j;
-                }
-            }
-            red2[bin_idx] = max2;
-            jpeak2[bin_idx] = jp2;
+        for (m1, jp1, m2, jp2) in results {
+            red.push(m1);
+            jpeak.push(jp1);
+            red2.push(m2);
+            jpeak2.push(jp2);
         }
 
         // 3. 计算 40% 分位数基线并归一化 (完全对标 WSJT-X 算法)
@@ -237,7 +243,7 @@ impl SyncSearcher {
 
         for cand in raw_candidates {
             let is_dupe = pruned.iter().any(|p| {
-                (p.freq - cand.freq).abs() < 4.0 && (p.dt - cand.dt).abs() < 0.04
+                (p.freq - cand.freq).abs() < 2.0 && (p.dt - cand.dt).abs() < 0.04
             });
             if !is_dupe {
                 pruned.push(cand);
@@ -260,13 +266,13 @@ impl SyncSearcher {
         let np2 = 2812isize;
 
         // 1. 粗时延搜索 (+/- 10 个 200 Hz 采样点 = +/- 50ms)
-        // 允许负时延信号 (对标 sync8.f90 / sync8d.f90)
+        // 粗搜索 delf = 0.0，无需旋转因子
         let i0 = ((init_dt + 0.5) * fs2).round() as isize;
         let mut smax = 0.0f32;
         let mut ibest = i0;
 
         for idt in (i0 - 10)..=(i0 + 10) {
-            let sync = self.calc_sync8d(cd0, idt, 0.0, np2);
+            let sync = self.calc_sync8d(cd0, idt, None, np2);
             if sync > smax {
                 smax = sync;
                 ibest = idt;
@@ -274,23 +280,39 @@ impl SyncSearcher {
         }
 
         // 2. 精细频偏搜索 (+/- 2.5 Hz，步长 0.5 Hz)
+        let dt2 = 1.0 / 200.0f32;
         let mut delf_best = 0.0f32;
+        let mut best_twk: Option<[Complex32; 32]> = None;
         smax = 0.0;
+
         for ifr in -5..=5 {
             let delf = (ifr as f32) * 0.5;
-            let sync = self.calc_sync8d(cd0, ibest, delf, np2);
+            let twk = if delf.abs() < 1e-4 {
+                None
+            } else {
+                let dphi = 2.0 * PI * delf * dt2;
+                let mut table = [Complex32::new(1.0, 0.0); 32];
+                for j in 0..32 {
+                    let (s, c) = ((j as f32) * dphi).sin_cos();
+                    table[j] = Complex32::new(c, s);
+                }
+                Some(table)
+            };
+
+            let sync = self.calc_sync8d(cd0, ibest, twk.as_ref(), np2);
             if sync > smax {
                 smax = sync;
                 delf_best = delf;
+                best_twk = twk;
             }
         }
 
-        // 3. 微调时延 (+/- 4 点)
+        // 3. 微调时延 (+/- 4 点)，复用最佳频偏的 twk 旋转表
         let mut final_ibest = ibest;
         smax = 0.0;
         for idt in -4..=4 {
             let idx = ibest + idt;
-            let sync = self.calc_sync8d(cd0, idx, delf_best, np2);
+            let sync = self.calc_sync8d(cd0, idx, best_twk.as_ref(), np2);
             if sync > smax {
                 smax = sync;
                 final_ibest = idx;
@@ -300,10 +322,9 @@ impl SyncSearcher {
         (final_ibest, delf_best, smax)
     }
 
-    fn calc_sync8d(&self, cd0: &[Complex32], i0: isize, delf: f32, np2: isize) -> f32 {
+    #[inline(always)]
+    fn calc_sync8d(&self, cd0: &[Complex32], i0: isize, twk: Option<&[Complex32; 32]>, np2: isize) -> f32 {
         let mut sync = 0.0f32;
-        let dt2 = 1.0 / 200.0f32;
-        let dphi = 2.0 * PI * delf * dt2;
 
         for i in 0..7 {
             let i1 = i0 + (i as isize) * 32;
@@ -315,8 +336,10 @@ impl SyncSearcher {
             let mut z3 = Complex32::new(0.0, 0.0);
 
             for j in 0..32 {
-                let twk = Complex32::new(((j as f32) * dphi).cos(), ((j as f32) * dphi).sin());
-                let ref_val = self.cos_table[i][j] * twk;
+                let ref_val = match twk {
+                    Some(table) => self.cos_table[i][j] * table[j],
+                    None => self.cos_table[i][j],
+                };
 
                 let idx1 = i1 + (j as isize);
                 if idx1 >= 0 && idx1 < np2 && (idx1 as usize) < cd0.len() {

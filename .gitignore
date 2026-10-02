@@ -5,3 +5,5 @@
 *.pdb
 *.o
 *.a
+*.tar.gz
+ft8_decode_aarch64
