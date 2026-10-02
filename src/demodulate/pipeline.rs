@@ -194,6 +194,46 @@ impl Ft8Pipeline {
         decoded_all.sort_by(|a, b| a.freq.partial_cmp(&b.freq).unwrap());
         decoded_all
     }
+
+    /// 完整结构化解码函数，支持传入窗口起始点时间偏移 (window_start_offset)
+    ///
+    /// 自动对 DT 进行时间窗口基准校正，并解析出发送方、接收方、国家地区、通联阶段、网格等结构化字段
+    pub fn decode_structured(
+        &self,
+        audio: &[f32],
+        config: &DecoderConfig,
+        window_start_offset: f32,
+    ) -> Vec<crate::demodulate::message::Ft8DecodedMessage> {
+        let raw_signals = self.decode(audio, config);
+        raw_signals
+            .into_iter()
+            .map(|sig| {
+                crate::demodulate::message::Ft8DecodedMessage::parse(
+                    sig.dt,
+                    sig.snr,
+                    sig.freq,
+                    &sig.message,
+                    window_start_offset,
+                )
+            })
+            .collect()
+    }
+
+    /// 支持用户自定义回调句柄的解码函数
+    pub fn decode_with_callback<F>(
+        &self,
+        audio: &[f32],
+        config: &DecoderConfig,
+        window_start_offset: f32,
+        mut callback: F,
+    ) where
+        F: FnMut(crate::demodulate::message::Ft8DecodedMessage),
+    {
+        let messages = self.decode_structured(audio, config, window_start_offset);
+        for msg in messages {
+            callback(msg);
+        }
+    }
 }
 
 impl Default for Ft8Pipeline {

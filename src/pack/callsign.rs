@@ -93,6 +93,52 @@ pub fn parse_cq_modifier(call: &str) -> Option<u32> {
 pub fn pack28(call: &str) -> Result<(u32, u8), String> {
     let call_trim = call.trim().to_ascii_uppercase();
 
+    // 0. 带括号的哈希呼号处理: <HEX>[CALL] 或 <HEX> 或 <CALL>
+    if call_trim.starts_with('<') {
+        if let Some(r_bracket) = call_trim.find('>') {
+            let inside = call_trim[1..r_bracket].trim();
+
+            // 若存在 [CALL] 后缀，如 <ED3C6B>[BG5VDH]
+            let real_call = if let Some(l_sq) = call_trim.find('[') {
+                if let Some(r_sq) = call_trim.find(']') {
+                    if r_sq > l_sq {
+                        Some(call_trim[l_sq + 1..r_sq].trim())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(c) = real_call {
+                if !c.is_empty() {
+                    cache_callsign(c);
+                }
+            }
+
+            // 1. 如果尖括号内是纯十六进制数值 (如 <ED3C6B> 或 <1A2B3C>)
+            if inside.len() <= 6 && !inside.is_empty() && inside.chars().all(|c| c.is_ascii_hexdigit()) {
+                if let Ok(n_hex) = u32::from_str_radix(inside, 16) {
+                    if n_hex < MAX22 {
+                        let n28 = NTOKENS + n_hex;
+                        return Ok((n28, 0));
+                    }
+                }
+            }
+
+            // 2. 如果尖括号内是具体呼号 (如 <BG5VDH>)
+            if inside.len() >= 3 && inside.len() <= 11 {
+                let n22 = hash_callsign(inside, 22);
+                cache_callsign(inside);
+                let n28 = NTOKENS + n22;
+                return Ok((n28, 0));
+            }
+        }
+    }
+
     // 1. 特殊 Token
     if call_trim == "DE" {
         return Ok((0, 0));
@@ -170,12 +216,13 @@ pub fn unpack28(n28: u32, ip: u8, i3: u8) -> Result<String, String> {
 
     let n28_rem = n28 - NTOKENS;
 
-    // 2. 22-bit 哈希呼号
+    // 2. 22-bit 哈希呼号 (严格格式化为 <HEX>[CALL] 或 <HEX>)
     if n28_rem < MAX22 {
+        let hex_str = format!("{:06X}", n28_rem);
         if let Some(call) = lookup_callsign_22(n28_rem) {
-            return Ok(format!("<{}>", call));
+            return Ok(format!("<{}>[{}]", hex_str, call));
         }
-        return Ok("<...>".to_string());
+        return Ok(format!("<{}>", hex_str));
     }
 
     // 3. 标准呼号解包

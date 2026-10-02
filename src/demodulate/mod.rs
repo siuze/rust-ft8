@@ -10,6 +10,7 @@
 pub mod baseline;
 pub mod downsample;
 pub mod extract;
+pub mod message;
 pub mod pipeline;
 pub mod streaming;
 pub mod subtract;
@@ -18,8 +19,9 @@ pub mod sync;
 pub use baseline::{BaselineEstimator, BaselineSpectrum};
 pub use downsample::Downsampler;
 pub use extract::{DecodedSignal, SymbolExtractor};
+pub use message::{Ft8DecodedMessage, MessageType, QsoStage};
 pub use pipeline::{read_wav_file, DecoderConfig, Ft8Pipeline};
-pub use streaming::{StreamEvent, StreamingFt8Receiver};
+pub use streaming::{StreamDecodedEvent, StreamEvent, StreamingFt8Receiver};
 pub use subtract::SignalSubtracter;
 pub use sync::{Candidate, SyncSearcher};
 

@@ -7,5 +7,6 @@
 pub mod synth;
 pub mod tones;
 
-pub use synth::{fast_erf, gfsk_pulse, synth_ft8_audio, write_wav_file};
+pub use synth::{encode_message_to_audio, fast_erf, gfsk_pulse, synth_ft8_audio, write_wav_file};
 pub use tones::{encode_message_to_tones, ft8_bits_to_tones, ft8_payload_to_tones};
+

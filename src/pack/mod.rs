@@ -148,7 +148,12 @@ pub fn unpack77(payload: &[u8; 10]) -> Result<Ft8Message, String> {
             let icq = (payload[9] >> 6) & 0x01;
 
             let call_decoded = unpack58(n58)?;
-            let call_hash = lookup_callsign_12(n12).map(|c| format!("<{}>", c)).unwrap_or_else(|| "<...>".to_string());
+            let hex12 = format!("{:03X}", n12);
+            let call_hash = if let Some(c) = lookup_callsign_12(n12) {
+                format!("<{}>[{}]", hex12, c)
+            } else {
+                format!("<{}>", hex12)
+            };
 
             let (call_1, call_2) = if iflip == 0 {
                 (call_hash, call_decoded)
@@ -319,7 +324,48 @@ fn pack_nonstd(parts: &[&str]) -> Result<[u8; 10], String> {
     let n12 = if is_cq {
         0u16
     } else {
-        crate::hash::hash_callsign(call12, 12) as u16
+        let c = call12.trim();
+        // 检查是否为 <HEX>[CALL] 格式
+        let (hex_part, call_part) = if c.starts_with('<') {
+            if let Some(r_b) = c.find('>') {
+                let inside = &c[1..r_b];
+                let real_call = if let Some(l_sq) = c.find('[') {
+                    if let Some(r_sq) = c.find(']') {
+                        if r_sq > l_sq {
+                            Some(&c[l_sq + 1..r_sq])
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                (Some(inside), real_call)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        if let Some(real) = call_part {
+            crate::hash::cache_callsign(real);
+        }
+
+        if let Some(h) = hex_part {
+            if let Ok(val) = u16::from_str_radix(h, 16) {
+                val & 0x0FFF
+            } else {
+                let real = call_part.unwrap_or(h);
+                crate::hash::cache_callsign(real);
+                crate::hash::hash_callsign(real, 12) as u16
+            }
+        } else {
+            crate::hash::cache_callsign(c);
+            crate::hash::hash_callsign(c, 12) as u16
+        }
     };
 
     let n58 = pack58(call58).ok_or_else(|| format!("无法打包 58-bit 呼号: {}", call58))?;
@@ -389,8 +435,8 @@ mod tests {
     fn test_nonstandard_roundtrip() {
         let test_msgs = [
             "CQ PJ4/KA1ABC",
-            "<W1AW> PJ4/KA1ABC RR73",
-            "PJ4/KA1ABC <W1AW> 73",
+            "<124>[W1AW] PJ4/KA1ABC RR73",
+            "PJ4/KA1ABC <124>[W1AW] 73",
         ];
 
         for &msg in &test_msgs {

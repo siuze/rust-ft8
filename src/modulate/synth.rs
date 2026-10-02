@@ -176,6 +176,25 @@ pub fn write_wav_file<P: AsRef<Path>>(
     Ok(())
 }
 
+/// 根据文本消息直接编码并合成 12000 Hz 连续相位 GFSK 音频波形
+///
+/// # 参数
+/// - `message`: FT8 消息文本 (如 "CQ BD4SUR OM99" 或 "<ED3C6B>[BG5VDH] VR2XXX -10")
+/// - `f0`: 载波音频起始频率 (Hz，如 1000.0)
+/// - `sample_rate`: 音频采样率 (推荐 12000)
+/// - `delay_seconds`: 相对时隙起始的发射时间偏移 (通常为 0.5s)
+/// - `full_slot`: 是否补全为完整 15 秒 (180,000 点) 数组
+pub fn encode_message_to_audio(
+    message: &str,
+    f0: f32,
+    sample_rate: usize,
+    delay_seconds: f32,
+    full_slot: bool,
+) -> Result<Vec<f32>, String> {
+    let tones = crate::modulate::encode_message_to_tones(message)?;
+    Ok(synth_ft8_audio(&tones, f0, sample_rate, delay_seconds, full_slot))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

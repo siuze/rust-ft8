@@ -18,9 +18,10 @@
 
 use super::downsample::NMAX;
 use super::extract::DecodedSignal;
+use super::message::Ft8DecodedMessage;
 use super::pipeline::{DecoderConfig, Ft8Pipeline};
 
-/// 流式接收器状态事件
+/// 流式接收器原始状态事件
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// 阶段 1 (t ≈ 1.6s)：前导码已就位，锁定空中活跃频点
@@ -29,6 +30,26 @@ pub enum StreamEvent {
     EarlyDecoded(Vec<DecodedSignal>),
     /// 阶段 3 (t ≈ 12.64s ~ 12.8s)：发射全部结束，微弱信号消减扫尾完成，输出全量最终结果 (比 15s 提前 2.2 秒！)
     CycleCompleted(Vec<DecodedSignal>),
+}
+
+/// 完整结构化流式接收器事件 (含 DT 真实窗口基准校正与 9 项完整结构化字段)
+#[derive(Debug, Clone)]
+pub enum StreamDecodedEvent {
+    /// 阶段 1 (t ≈ 1.44s)：前导码已就位，快速锁定空中活跃载频
+    PreambleDetected {
+        active_frequencies: Vec<f32>,
+        time_sec: f32,
+    },
+    /// 阶段 2 (t ≈ 11.36s ~ 11.52s)：有效数据已全部收齐，提前输出强信号结果
+    EarlyDecoded {
+        signals: Vec<Ft8DecodedMessage>,
+        time_sec: f32,
+    },
+    /// 阶段 3 (t ≈ 12.5s ~ 12.8s)：发射全部结束，微弱信号消减扫尾完成，全量最终结果交付
+    CycleCompleted {
+        all_signals: Vec<Ft8DecodedMessage>,
+        time_sec: f32,
+    },
 }
 
 /// 流式边收边解 FT8 接收机
@@ -41,11 +62,23 @@ pub struct StreamingFt8Receiver {
     early_fired: bool,
     cycle_fired: bool,
     early_results: Vec<DecodedSignal>,
+    window_start_offset: f32,
 }
 
 impl StreamingFt8Receiver {
-    /// 创建流式接收机实例
+    /// 创建流式接收机实例 (默认 window_start_offset = 0.0)
     pub fn new(config: DecoderConfig) -> Self {
+        Self::with_window_offset(config, 0.0)
+    }
+
+    /// 创建带时间窗口起始点偏移的流式接收机实例
+    ///
+    /// # 参数
+    /// - `config`: 解调参数
+    /// - `window_start_offset`: 录音起始点相对于真实 15 秒时隙起点的偏移 (秒)
+    ///   - 例如：调用者以当前时间窗口 -0.9s 作为录音开始，则传入 `-0.9`；
+    ///   - 各个解码信号的 DT 将自动以此校正为相对真实时间窗口的时间延迟。
+    pub fn with_window_offset(config: DecoderConfig, window_start_offset: f32) -> Self {
         Self {
             pipeline: Ft8Pipeline::new(),
             config,
@@ -55,6 +88,7 @@ impl StreamingFt8Receiver {
             early_fired: false,
             cycle_fired: false,
             early_results: Vec::new(),
+            window_start_offset,
         }
     }
 
@@ -68,8 +102,7 @@ impl StreamingFt8Receiver {
         self.early_results.clear();
     }
 
-    /// 流式喂入音频切片 (建议每次喂入 160ms，即 1920 个采样点 @ 12000Hz)
-    /// 返回当前产生的时序事件列表
+    /// 流式喂入音频切片，返回原始事件列表 (保持向后兼容)
     pub fn feed_chunk(&mut self, chunk: &[f32]) -> Vec<StreamEvent> {
         let mut events = Vec::new();
         let chunk_len = chunk.len();
@@ -95,11 +128,10 @@ impl StreamingFt8Receiver {
         }
 
         // 里程碑 2：提前解码时机 (t >= 11.52s, 即 138240 采样点，第 72 符号到达)
-        // 关键物理事实：58 个数据符号已全部接收完毕，尾部 7 个 Costas 同步符号尚未到达，作为 Erasure 提前解码！
         if !self.early_fired && self.samples_in_cycle >= 138240 {
             self.early_fired = true;
             let mut early_cfg = self.config.clone();
-            early_cfg.passes = 1; // 提前解码阶段执行快速 Pass 1，提取全部信噪比良好的信号
+            early_cfg.passes = 1;
             let decodes = self.pipeline.decode(&self.audio_buffer, &early_cfg);
             self.early_results = decodes.clone();
             if !decodes.is_empty() {
@@ -108,7 +140,6 @@ impl StreamingFt8Receiver {
         }
 
         // 里程碑 3：信号发射全部结束时刻 (t >= 12.64s, 即 151680 采样点，第 79 符号到达)
-        // 补齐尾导码能量，执行完整多 Pass 消减解调微弱信号，全时隙解码在此收尾
         if !self.cycle_fired && self.samples_in_cycle >= 151680 {
             self.cycle_fired = true;
             let final_decodes = self.pipeline.decode(&self.audio_buffer, &self.config);
@@ -121,6 +152,76 @@ impl StreamingFt8Receiver {
         }
 
         events
+    }
+
+    /// 流式喂入音频切片，返回带真实窗口 DT 校正与 9 项完整结构化字段的事件列表
+    pub fn feed_chunk_structured(&mut self, chunk: &[f32]) -> Vec<StreamDecodedEvent> {
+        let raw_events = self.feed_chunk(chunk);
+        let current_time_sec = (self.samples_in_cycle as f32) / 12000.0;
+        let offset = self.window_start_offset;
+
+        raw_events
+            .into_iter()
+            .map(|ev| match ev {
+                StreamEvent::PreambleDetected { active_frequencies } => {
+                    StreamDecodedEvent::PreambleDetected {
+                        active_frequencies,
+                        time_sec: current_time_sec,
+                    }
+                }
+                StreamEvent::EarlyDecoded(signals) => {
+                    let structured: Vec<Ft8DecodedMessage> = signals
+                        .into_iter()
+                        .map(|s| Ft8DecodedMessage::parse(s.dt, s.snr, s.freq, &s.message, offset))
+                        .collect();
+                    StreamDecodedEvent::EarlyDecoded {
+                        signals: structured,
+                        time_sec: current_time_sec,
+                    }
+                }
+                StreamEvent::CycleCompleted(signals) => {
+                    let structured: Vec<Ft8DecodedMessage> = signals
+                        .into_iter()
+                        .map(|s| Ft8DecodedMessage::parse(s.dt, s.snr, s.freq, &s.message, offset))
+                        .collect();
+                    StreamDecodedEvent::CycleCompleted {
+                        all_signals: structured,
+                        time_sec: current_time_sec,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// 支持用户自定义回调句柄 (Callback) 的流式喂流接口
+    ///
+    /// # 示例
+    /// ```no_run
+    /// use rust_ft8::demodulate::{DecoderConfig, StreamingFt8Receiver, StreamDecodedEvent};
+    ///
+    /// let mut receiver = StreamingFt8Receiver::with_window_offset(DecoderConfig::default(), -0.9);
+    /// let chunk = [0.0f32; 1920]; // 160ms 音频帧
+    ///
+    /// receiver.feed_chunk_with_callback(&chunk, |event| {
+    ///     match event {
+    ///         StreamDecodedEvent::EarlyDecoded { signals, time_sec } => {
+    ///             println!("提前输出 {} 条强信号 (t={:.2}s)", signals.len(), time_sec);
+    ///         }
+    ///         StreamDecodedEvent::CycleCompleted { all_signals, .. } => {
+    ///             println!("全量完成 {} 条信号", all_signals.len());
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// });
+    /// ```
+    pub fn feed_chunk_with_callback<F>(&mut self, chunk: &[f32], mut callback: F)
+    where
+        F: FnMut(StreamDecodedEvent),
+    {
+        let events = self.feed_chunk_structured(chunk);
+        for ev in events {
+            callback(ev);
+        }
     }
 
     /// 快速粗扫描当前音频流中的活跃载波频点
