@@ -6,6 +6,7 @@
 //! 3. 多符号相干 LLR 提取与混合 LDPC 译码
 //! 4. 强信号时域重构与残差消减，激活多 Pass 弱信号深挖
 
+use super::baseline::BaselineEstimator;
 use super::downsample::{Downsampler, NMAX};
 use super::extract::{DecodedSignal, SymbolExtractor};
 use super::subtract::SignalSubtracter;
@@ -41,6 +42,7 @@ pub struct Ft8Pipeline {
     searcher: SyncSearcher,
     extractor: SymbolExtractor,
     subtracter: SignalSubtracter,
+    baseline_estimator: BaselineEstimator,
 }
 
 impl Ft8Pipeline {
@@ -50,6 +52,7 @@ impl Ft8Pipeline {
             searcher: SyncSearcher::new(),
             extractor: SymbolExtractor::new(),
             subtracter: SignalSubtracter::new(),
+            baseline_estimator: BaselineEstimator::new(),
         }
     }
 
@@ -57,7 +60,20 @@ impl Ft8Pipeline {
     pub fn decode(&self, audio: &[f32], config: &DecoderConfig) -> Vec<DecodedSignal> {
         let mut working_audio = vec![0.0f32; NMAX];
         let copy_len = audio.len().min(NMAX);
-        working_audio[..copy_len].copy_from_slice(&audio[..copy_len]);
+
+        // 严格 1:1 对标 WSJT-X: 将输入音频统一至 16-bit PCM 整型浮点量纲 ([-32768, 32767])
+        let max_val = audio.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        let scale = if max_val <= 2.0 && max_val > 1e-6 {
+            32768.0
+        } else {
+            1.0
+        };
+        for i in 0..copy_len {
+            working_audio[i] = audio[i] * scale;
+        }
+
+        // 预先计算整段音频的物理背景底噪谱 sbase (对标 WSJT-X sync8.f90 L44 / ft8_decode.f90 L201)
+        let baseline = self.baseline_estimator.estimate_baseline(&working_audio, config.nfa, config.nfb);
 
         let mut decoded_all: Vec<DecodedSignal> = Vec::new();
 
@@ -99,8 +115,11 @@ impl Ft8Pipeline {
                 let cd0 = self.downsampler.downsample(&long_fft, f1);
                 let (ibest, _, sync_pow) = self.searcher.fine_sync(&cd0, cand.dt);
 
+                // 计算当前载频处的物理噪声基线 xbase (对标 ft8_decode.f90 L201)
+                let xbase = baseline.get_xbase(f1);
+
                 // 提取多符号能量并送入译码器
-                if let Some(sig) = self.extractor.extract_and_decode(&cd0, ibest, f1, sync_pow) {
+                if let Some(sig) = self.extractor.extract_and_decode(&cd0, ibest, f1, sync_pow, xbase) {
                     // 确认消息是否新出现 (对标 WSJT-X ft8_decode.f90: 仅按消息文本去重，支持近邻与同频弱信号检出)
                     let is_dup = decoded_all.iter().any(|d| d.message == sig.message);
 

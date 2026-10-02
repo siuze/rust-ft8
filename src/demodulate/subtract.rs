@@ -81,7 +81,7 @@ impl SignalSubtracter {
         audio: &mut [f32],
         tones: &[u8; NUM_SYMBOLS],
         f0: f32,
-        ibest_200: usize,
+        ibest_200: isize,
     ) {
         if audio.len() < NMAX {
             return;
@@ -92,7 +92,7 @@ impl SignalSubtracter {
 
         // 2. 解调出基带复包络 camp(i) = dd(nstart + i) * conj(cref(i))
         // 200 Hz 基带采样点 ibest 对应 12000 Hz 原始采样的精确点 ibest * 60 (对标 WSJT-X nstart = dt*12000 + 1)
-        let nstart = (ibest_200 * 60) as isize;
+        let nstart = ibest_200 * 60;
         let mut camp = vec![Complex32::new(0.0, 0.0); NMAX];
 
         for i in 0..NFRAME {

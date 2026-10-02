@@ -255,22 +255,21 @@ impl SyncSearcher {
         &self,
         cd0: &[Complex32],
         init_dt: f32,
-    ) -> (usize, f32, f32) {
+    ) -> (isize, f32, f32) {
         let fs2 = 200.0f32;
-        let np2 = 2812usize;
+        let np2 = 2812isize;
 
         // 1. 粗时延搜索 (+/- 10 个 200 Hz 采样点 = +/- 50ms)
-        let i0 = (((init_dt + 0.5) * fs2).round() as isize).max(10);
+        // 允许负时延信号 (对标 sync8.f90 / sync8d.f90)
+        let i0 = ((init_dt + 0.5) * fs2).round() as isize;
         let mut smax = 0.0f32;
-        let mut ibest = i0 as usize;
+        let mut ibest = i0;
 
         for idt in (i0 - 10)..=(i0 + 10) {
-            if idt >= 0 {
-                let sync = self.calc_sync8d(cd0, idt as usize, 0.0, np2);
-                if sync > smax {
-                    smax = sync;
-                    ibest = idt as usize;
-                }
+            let sync = self.calc_sync8d(cd0, idt, 0.0, np2);
+            if sync > smax {
+                smax = sync;
+                ibest = idt;
             }
         }
 
@@ -290,7 +289,7 @@ impl SyncSearcher {
         let mut final_ibest = ibest;
         smax = 0.0;
         for idt in -4..=4 {
-            let idx = (ibest as isize + idt).max(0) as usize;
+            let idx = ibest + idt;
             let sync = self.calc_sync8d(cd0, idx, delf_best, np2);
             if sync > smax {
                 smax = sync;
@@ -301,13 +300,13 @@ impl SyncSearcher {
         (final_ibest, delf_best, smax)
     }
 
-    fn calc_sync8d(&self, cd0: &[Complex32], i0: usize, delf: f32, np2: usize) -> f32 {
+    fn calc_sync8d(&self, cd0: &[Complex32], i0: isize, delf: f32, np2: isize) -> f32 {
         let mut sync = 0.0f32;
         let dt2 = 1.0 / 200.0f32;
         let dphi = 2.0 * PI * delf * dt2;
 
         for i in 0..7 {
-            let i1 = i0 + i * 32;
+            let i1 = i0 + (i as isize) * 32;
             let i2 = i1 + 36 * 32;
             let i3 = i1 + 72 * 32;
 
@@ -319,14 +318,17 @@ impl SyncSearcher {
                 let twk = Complex32::new(((j as f32) * dphi).cos(), ((j as f32) * dphi).sin());
                 let ref_val = self.cos_table[i][j] * twk;
 
-                if i1 + j < np2 && i1 + j < cd0.len() {
-                    z1 += cd0[i1 + j] * ref_val.conj();
+                let idx1 = i1 + (j as isize);
+                if idx1 >= 0 && idx1 < np2 && (idx1 as usize) < cd0.len() {
+                    z1 += cd0[idx1 as usize] * ref_val.conj();
                 }
-                if i2 + j < np2 && i2 + j < cd0.len() {
-                    z2 += cd0[i2 + j] * ref_val.conj();
+                let idx2 = i2 + (j as isize);
+                if idx2 >= 0 && idx2 < np2 && (idx2 as usize) < cd0.len() {
+                    z2 += cd0[idx2 as usize] * ref_val.conj();
                 }
-                if i3 + j < np2 && i3 + j < cd0.len() {
-                    z3 += cd0[i3 + j] * ref_val.conj();
+                let idx3 = i3 + (j as isize);
+                if idx3 >= 0 && idx3 < np2 && (idx3 as usize) < cd0.len() {
+                    z3 += cd0[idx3 as usize] * ref_val.conj();
                 }
             }
 

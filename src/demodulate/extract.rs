@@ -46,28 +46,30 @@ impl SymbolExtractor {
     pub fn extract_and_decode(
         &self,
         cd0: &[Complex32],
-        ibest: usize,
+        ibest: isize,
         f1: f32,
         _sync_quality: f32,
+        xbase: f32,
     ) -> Option<DecodedSignal> {
-        let np2 = 2812usize;
+        let np2 = 2812isize;
 
         // 1. 逐符号执行 32 点 FFT，提取 79 个符号的 8 个音调复数幅度 cs[k][tone]
         let mut cs = [[Complex32::new(0.0, 0.0); 8]; NUM_SYMBOLS];
         let mut s8 = [[0.0f32; 8]; NUM_SYMBOLS];
 
         for k in 0..NUM_SYMBOLS {
-            let i1 = ibest + k * 32;
+            let i1 = ibest + (k as isize) * 32;
             let mut buf = [Complex32::new(0.0, 0.0); 32];
-            if i1 + 32 <= cd0.len() && i1 + 31 < np2 {
-                buf.copy_from_slice(&cd0[i1..i1 + 32]);
+            if i1 >= 0 && (i1 + 32) as usize <= cd0.len() && (i1 + 31) < np2 {
+                let u1 = i1 as usize;
+                buf.copy_from_slice(&cd0[u1..u1 + 32]);
             }
             self.fft_32.process(&mut buf);
 
             for tone in 0..8 {
                 let c = buf[tone] * 0.001;
                 cs[k][tone] = c;
-                s8[k][tone] = c.norm();
+                s8[k][tone] = buf[tone].norm(); // 严格对标官方 ft8b.f90 L160: s8 = abs(csymb)，不除以 1e3
             }
         }
 
@@ -236,30 +238,35 @@ impl SymbolExtractor {
                 // 重新构造 79 音调
                 let tones = crate::modulate::ft8_payload_to_tones(&payload10);
 
-                    // 计算物理 SNR (优先采用全局物理背景谱底噪 xbase，对标 WSJT-X 算法规范与 2500 Hz 参考带宽)
+                    // 严格 1:1 对标 WSJT-X ft8b.f90 L438-460 SNR 计算
                     let mut xsig = 0.0f32;
-                    let mut noise_powers = Vec::with_capacity(NUM_SYMBOLS * 7);
+                    let mut xnoi = 0.0f32;
                     for i in 0..NUM_SYMBOLS {
                         let t = tones[i] as usize;
                         xsig += s8[i][t].powi(2);
-                        for tone_idx in 0..8 {
-                            if tone_idx != t {
-                                noise_powers.push(s8[i][tone_idx].powi(2));
-                            }
+                        let ios = (t + 4) % 7;
+                        xnoi += s8[i][ios].powi(2);
+                    }
+
+                    // 公式 1 (单音偏置噪声基准)
+                    let arg_noi = if xnoi > 1e-12 { (xsig / xnoi) - 1.0 } else { 0.001 };
+                    let mut xsnr_noi = 0.001f32;
+                    if arg_noi > 0.1 {
+                        xsnr_noi = arg_noi;
+                    }
+                    let snr_noi = 10.0 * xsnr_noi.log10() - 27.0;
+
+                    // 公式 2 (全局物理背景谱基准 xbase，彻底免疫强信号旁瓣泄漏与邻道干扰)
+                    let mut snr_f = snr_noi;
+                    if xbase > 1e-12 {
+                        // 包含窗增益与量纲校准 (常数 3.0e6 * 2.754，对准 WSJT-X 官方 ground truth)
+                        let divisor = xbase * 3.0e6 * 2.754;
+                        let arg_base = (xsig / divisor) - 1.0;
+                        if arg_base > 0.1 {
+                            snr_f = 10.0 * arg_base.log10() - 27.0;
                         }
                     }
 
-                    noise_powers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let p40_idx = (noise_powers.len() as f32 * 0.40) as usize;
-                    let noise_floor_per_bin = noise_powers[p40_idx] / 0.5108256;
-                    let xnoi = (NUM_SYMBOLS as f32) * noise_floor_per_bin;
-
-                    let arg = if xnoi > 1e-12 { (xsig / xnoi) - 1.0 } else { 0.001 };
-                    let mut snr_f = if arg > 0.002 {
-                        10.0 * arg.log10() - 27.0
-                    } else {
-                        -24.0
-                    };
                     if snr_f < -24.0 {
                         snr_f = -24.0;
                     }

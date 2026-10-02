@@ -87,46 +87,61 @@ impl BaselineEstimator {
             }
         }
 
-        // 确定分析频带范围
-        let mut fa = nfa.max(100.0);
-        let mut fb = nfb.min(4910.0);
-        if fa >= fb {
+        // 确定分析频带范围 (对标 get_spectrum_baseline.f90 L38-51)
+        let nwin = nfb - nfa;
+        let mut fa = nfa;
+        let mut fb = nfb;
+        if fa < 100.0 {
             fa = 100.0;
-            fb = 3500.0;
+            if nwin < 100.0 {
+                fb = fa + nwin;
+            }
+        }
+        if fb > 4910.0 {
+            fb = 4910.0;
+            if nwin < 100.0 {
+                fa = fb - nwin;
+            }
         }
 
-        let ia = ((fa / df).round() as usize).max(1);
-        let ib = ((fb / df).round() as usize).min(NH1 - 1);
+        // 严格 1:1 对标 baseline.f90
+        let ia_1based = ((fa / df).round() as usize).max(1);
+        let ib_1based = ((fb / df).round() as usize).min(NH1);
 
-        // 转换为对数谱 (dB) (对标 baseline.f90)
+        let ia = ia_1based - 1; // 0-based
+        let ib = ib_1based - 1; // 0-based
+
+        // 转换为对数谱 (dB) (对标 baseline.f90 L17-19)
         let mut s_db = vec![0.0f32; NH1];
         for i in ia..=ib {
             s_db[i] = 10.0 * savg[i].max(1e-12).log10();
         }
 
-        // 分 10 段提取 10% 分位数下包络线数据点
+        // 分 10 段提取 10% 分位数下包络线数据点 (对标 baseline.f90 L21-36)
         let nseg = 10usize;
-        let nlen = (ib - ia + 1) / nseg;
-        let i0 = (ib - ia + 1) as f64 / 2.0;
+        let nlen = (ib_1based - ia_1based + 1) / nseg;
+        let i0 = ((ib_1based - ia_1based + 1) / 2) as f64;
 
         let mut xs = Vec::with_capacity(1000);
         let mut ys = Vec::with_capacity(1000);
 
         for n in 0..nseg {
-            let ja = ia + n * nlen;
-            let jb = if n == nseg - 1 { ib } else { ja + nlen - 1 };
-            if ja >= jb {
-                continue;
-            }
+            let ja_1 = ia_1based + n * nlen;
+            let jb_1 = ja_1 + nlen - 1;
+
+            let ja = ja_1 - 1;
+            let jb = jb_1 - 1;
 
             let mut seg_vals: Vec<f32> = (ja..=jb).map(|idx| s_db[idx]).collect();
             seg_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let p10_idx = ((seg_vals.len() as f32) * 0.10).round() as usize;
-            let base = seg_vals[p10_idx.min(seg_vals.len().saturating_sub(1))];
+            let j_rank = ((nlen as f32) * 0.10).round() as usize;
+            let p10_idx = j_rank.clamp(1, nlen) - 1;
+            let base = seg_vals[p10_idx];
 
-            for idx in ja..=jb {
+            for i_1 in ja_1..=jb_1 {
+                let idx = i_1 - 1;
                 if s_db[idx] <= base && xs.len() < 1000 {
-                    xs.push((idx - ia) as f64 - i0);
+                    xs.push((i_1 as f64) - i0);
                     ys.push(s_db[idx] as f64);
                 }
             }
@@ -135,14 +150,15 @@ impl BaselineEstimator {
         // 4 阶多项式最小二乘拟合 (5 个参数: a0..a4)
         let coeffs = polyfit_order4(&xs, &ys);
 
-        // 重构全频带平滑底噪 sbase
+        // 重构全频带平滑底噪 sbase (对标 baseline.f90 L40-46)
         let mut sbase = vec![0.0f32; NH1];
-        for i in 0..NH1 {
-            let t = (i as f64) - (ia as f64) - i0;
+        for i_1 in ia_1based..=ib_1based {
+            let idx = i_1 - 1;
+            let t = (i_1 as f64) - i0;
             let val = coeffs[0]
                 + t * (coeffs[1] + t * (coeffs[2] + t * (coeffs[3] + t * coeffs[4])))
                 + 0.65; // WSJT-X 经验偏移常数 +0.65 dB
-            sbase[i] = val as f32;
+            sbase[idx] = val as f32;
         }
 
         BaselineSpectrum {
@@ -157,8 +173,9 @@ impl BaselineEstimator {
 impl BaselineSpectrum {
     /// 计算指定频率处的物理参考噪声功率 xbase (对标 ft8_decode.f90 L201)
     pub fn get_xbase(&self, freq: f32) -> f32 {
-        let bin = (freq / self.df).round() as usize;
-        let clamped_bin = bin.clamp(self.ia, self.ib);
+        let bin_1based = (freq / self.df).round() as usize;
+        let bin_0based = bin_1based.saturating_sub(1);
+        let clamped_bin = bin_0based.clamp(self.ia, self.ib);
         let sbase_db = self.sbase[clamped_bin];
         10.0_f32.powf(0.1 * (sbase_db - 40.0))
     }
