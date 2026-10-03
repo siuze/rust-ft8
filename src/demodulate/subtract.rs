@@ -131,14 +131,15 @@ impl SignalSubtracter {
         audio_snapshot: &[f32],
     ) -> (isize, Vec<f32>) {
         let mut bufs = self.create_buffers();
-        self.reconstruct_waveform_with_buf(tones, f0, ibest_200, audio_snapshot, &mut bufs)
+        self.reconstruct_waveform_with_buf(tones, f0, 0.0, ibest_200, audio_snapshot, &mut bufs)
     }
 
-    /// 零堆分配的高性能波形重构：复用工作线程持有的缓存
+    /// 零堆分配的高性能波形重构：复用工作线程持有的缓存，支持频漂 (drift) 联合线性调频
     pub fn reconstruct_waveform_with_buf(
         &self,
         tones: &[u8; NUM_SYMBOLS],
         f0: f32,
+        drift: f32,
         ibest_200: isize,
         audio_snapshot: &[f32],
         bufs: &mut SubtractionBuffers,
@@ -150,8 +151,8 @@ impl SignalSubtracter {
             return (nstart, reconstructed);
         }
 
-        // 1. 合成复数参考信号 cref (复用预分配 dphi 与 cref 缓存)
-        self.synth_complex_ref_into(tones, f0, &mut bufs.dphi, &mut bufs.cref);
+        // 1. 合成复数参考信号 cref (复用预分配 dphi 与 cref 缓存，引入频漂补偿)
+        self.synth_complex_ref_into(tones, f0, drift, &mut bufs.dphi, &mut bufs.cref);
 
         // 2. 解调出基带复包络 camp(i) = dd(nstart + i) * conj(cref(i))
         bufs.camp.fill(Complex32::new(0.0, 0.0));
@@ -186,11 +187,12 @@ impl SignalSubtracter {
         (nstart, reconstructed)
     }
 
-    /// 合成 12000 Hz 连续相位复数参考波形，写入指定缓冲区
+    /// 合成 12000 Hz 连续相位复数参考波形，写入指定缓冲区 (支持 drift 线性调频)
     fn synth_complex_ref_into(
         &self,
         tones: &[u8; NUM_SYMBOLS],
         f0: f32,
+        drift: f32,
         dphi: &mut [f32],
         cref: &mut [Complex32],
     ) {
@@ -213,6 +215,14 @@ impl SignalSubtracter {
         for j in 0..(2 * n_spsym) {
             dphi[j] += t0 * self.pulse_scaled[j + n_spsym];
             dphi[j + n_wave] += t_last * self.pulse_scaled[j];
+        }
+
+        // 频漂线性相位调整
+        if drift.abs() > 0.01 {
+            let drift_fac = 2.0 * PI * drift / (12000.0 * (n_wave as f32));
+            for k in 0..n_wave {
+                dphi[k + n_spsym] += (k as f32) * drift_fac;
+            }
         }
 
         let mut phi = 0.0f32;

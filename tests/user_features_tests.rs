@@ -60,6 +60,7 @@ fn test_structured_decoder_with_window_offset() {
         nfb: 3500.0,
         passes: 2,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     // 假设调用者提前 0.9s 开始录音，传入 window_start_offset = -0.9
@@ -113,6 +114,7 @@ fn test_streaming_decoder_with_callback() {
         nfb: 3500.0,
         passes: 1,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     // 使用带 -0.9s 偏移的流式接收机

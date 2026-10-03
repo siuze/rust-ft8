@@ -233,7 +233,7 @@ impl StreamingFt8Receiver {
                 StreamEvent::EarlyDecoded(signals) => {
                     let structured: Vec<Ft8DecodedMessage> = signals
                         .into_iter()
-                        .map(|s| Ft8DecodedMessage::parse(s.dt, s.snr, s.freq, &s.message, offset))
+                        .map(|s| Ft8DecodedMessage::parse_with_drift(s.dt, s.snr, s.freq, s.drift, &s.message, offset))
                         .collect();
                     StreamDecodedEvent::EarlyDecoded {
                         signals: structured,
@@ -243,7 +243,7 @@ impl StreamingFt8Receiver {
                 StreamEvent::CycleCompleted(signals) => {
                     let structured: Vec<Ft8DecodedMessage> = signals
                         .into_iter()
-                        .map(|s| Ft8DecodedMessage::parse(s.dt, s.snr, s.freq, &s.message, offset))
+                        .map(|s| Ft8DecodedMessage::parse_with_drift(s.dt, s.snr, s.freq, s.drift, &s.message, offset))
                         .collect();
                     StreamDecodedEvent::CycleCompleted {
                         all_signals: structured,

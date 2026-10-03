@@ -99,11 +99,11 @@
 - **频漂（Drift Rate）跟踪缺失**：当前相干消除算法假设信号在 12.64 秒内载波恒定无漂移，遇到存在频偏漂移的信号时，相干消除残差偏大；
 - **部分非标准报文格式覆盖不全**：少数罕见的特种比赛与遥测格式（Type 3/4 变体）尚未全部覆盖。
 
-### 后续优化计划
-- [ ] 增加可选的自适应深搜译码模式（`DecoderConfig.deep_search = true`），放开 OSD 回溯深度，补齐漏检信号；
-- [ ] 引入频漂（Drift Rate $\Delta f / \Delta t$）联合估计与动态插值相干消除；
-- [ ] 借鉴 WSJT-X 2.6/2.7 的 A Priori (AP) 先验信息译码机制，对已知通联呼号注入先验 LLR；
-- [ ] 完善 77-bit 罕见特种报文格式的解析覆盖。
+### 后续优化计划与进展
+- [x] 增加可选的自适应深搜译码模式（`DecoderConfig.deep_search = true`），放开 OSD 满秩搜索深度与多符号相干通道，补齐边缘漏检信号；
+- [x] 引入频漂（Drift Rate $\Delta f / \Delta t$）联合估计与动态调频时域相干消除，提升密集弱信号消减深度；
+- [x] 完善 77-bit 罕见特种报文格式（Type 0.1~0.4, Type 3, Type 5）解析覆盖；
+- [ ] 借鉴 WSJT-X 2.6/2.7 的 A Priori (AP) 先验信息译码机制，对已知通联呼号注入先验 LLR（后续放最后阶段实现）。
 
 ---
 
@@ -124,6 +124,10 @@ pub struct DecoderConfig {
     pub passes: usize,
     /// Costas (7x7) 同步检测归一化门限，默认 1.4 (有效范围 1.2~1.8)
     pub sync_min: f32,
+    /// 深度搜索模式：放开 OSD 回溯深度与全相干通道，大幅提升微弱信号检出率 (默认 false)
+    pub deep_search: bool,
+    /// 是否启用频漂跟踪 (Drift Rate) 与动态调频波形消减 (默认 true)
+    pub enable_drift: bool,
 }
 ```
 

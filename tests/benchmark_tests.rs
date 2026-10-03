@@ -71,6 +71,7 @@ fn test_decode_single_wav_websdr_test1() {
         nfb: 3500.0,
         passes: 3,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     let start = Instant::now();
@@ -97,6 +98,39 @@ fn test_decode_single_wav_websdr_test1() {
 }
 
 #[test]
+fn test_decode_single_wav_websdr_test1_deep_search() {
+    let wav_path = resolve_test_path("websdr_test1.wav");
+    let (audio, sample_rate) = read_wav_file(&wav_path).expect("读取 WAV 失败");
+    assert_eq!(sample_rate, 12000);
+
+    let pipeline = Ft8Pipeline::new();
+    let config = DecoderConfig {
+        nfa: 100.0,
+        nfb: 3500.0,
+        passes: 3,
+        sync_min: 1.4,
+        deep_search: true,
+        enable_drift: true,
+    };
+
+    let start = Instant::now();
+    let decodes = pipeline.decode(&audio, &config);
+    let elapsed = start.elapsed();
+
+    println!(
+        "\n[deep_search] websdr_test1.wav decoded {} messages in {:.2}s:",
+        decodes.len(),
+        elapsed.as_secs_f32()
+    );
+    for sig in &decodes {
+        println!(
+            "{:+3} dB  {:+.2}s  (drift:{:+.1}Hz)  {:4.0} Hz  ~  {}",
+            sig.snr, sig.dt, sig.drift, sig.freq, sig.message
+        );
+    }
+}
+
+#[test]
 fn test_benchmark_all_websdr_wavs() {
     let test_files = [
         "websdr_test1",
@@ -120,6 +154,7 @@ fn test_benchmark_all_websdr_wavs() {
         nfb: 3500.0,
         passes: 3,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     println!("\n==========================================================================");
@@ -234,6 +269,7 @@ fn test_benchmark_14_baseline_wavs() {
         nfb: 3500.0,
         passes: 3,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     println!("\n==========================================================================================");

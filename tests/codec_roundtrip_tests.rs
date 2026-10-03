@@ -25,6 +25,7 @@ fn test_single_signal_roundtrip() {
         nfb: 3500.0,
         passes: 1, // 单信号单轮即可快速解出
         sync_min: 1.4,
+        ..Default::default()
     };
 
     for &(msg, freq) in &test_messages {
@@ -92,6 +93,7 @@ fn test_multi_signal_concurrency_roundtrip() {
         nfb: 3500.0,
         passes: 2,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     let t0 = Instant::now();

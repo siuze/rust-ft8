@@ -11,6 +11,7 @@ fn test_snr_comparison_websdr_test1() {
         nfb: 3500.0,
         passes: 3,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     let decodes = pipeline.decode(&audio, &config);
@@ -237,7 +238,7 @@ fn test_compare_websdr_test4() {
     println!("精同步 2: f1={:.2} Hz, ibest={}, dt={:+.2} s, sync={:.2}", f1, ibest_final, dt_final, sync_final);
 
     let extractor = rust_ft8::demodulate::SymbolExtractor::new();
-    let extract_res = extractor.extract_and_decode(&cd0_fine, ibest_final, f1, sync_final, 1.0);
+    let extract_res = extractor.extract_and_decode(&cd0_fine, ibest_final, f1, 0.0, sync_final, 1.0, false);
     if let Some(sig) = extract_res {
         println!("解码成功: [{}] (freq={:.1}, dt={:+.2}, snr={:+})", sig.message, sig.freq, sig.dt, sig.snr);
     } else {

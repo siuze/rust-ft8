@@ -16,6 +16,7 @@ fn test_streaming_early_decoding_websdr_test1() {
         nfb: 3500.0,
         passes: 2,
         sync_min: 1.4,
+        ..Default::default()
     };
 
     let mut receiver = StreamingFt8Receiver::new(config);

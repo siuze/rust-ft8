@@ -69,23 +69,28 @@ pub struct Ft8DecodedMessage {
     pub qso_stage: QsoStage,
     /// 9. 消息中的网格定位 (Maidenhead Grid，如 "OL02"，若无则留空 "")
     pub grid: String,
+    /// 10. 信号频漂 (单位: Hz，在 12.64s 发射期内的频率漂移量)
+    pub drift: f32,
 }
 
 impl Ft8DecodedMessage {
     /// 从原始解调信号构造结构化消息，并结合 `window_start_offset` 进行 DT 时间基准校正
-    ///
-    /// # 参数
-    /// - `raw_dt`: 算法在传入音频切片中检出的相对时间偏移 (秒)
-    /// - `snr`: 信噪比 (dB)
-    /// - `freq`: 载波频率 (Hz)
-    /// - `message_text`: 解码出的文本 (如 "CQ BD4SUR OM99")
-    /// - `window_start_offset`: 录音起始点相对于真实 15s 时隙窗口起点的偏差 (秒)
-    ///   - 例如：调用者以当前时间窗口 -0.9s 作为录音开始，则传入 `-0.9`；
-    ///   - 校正后 `DT = raw_dt + window_start_offset`。
     pub fn parse(
         raw_dt: f32,
         snr: i32,
         freq: f32,
+        message_text: &str,
+        window_start_offset: f32,
+    ) -> Self {
+        Self::parse_with_drift(raw_dt, snr, freq, 0.0, message_text, window_start_offset)
+    }
+
+    /// 包含频漂 (drift) 的结构化消息解析函数
+    pub fn parse_with_drift(
+        raw_dt: f32,
+        snr: i32,
+        freq: f32,
+        drift: f32,
         message_text: &str,
         window_start_offset: f32,
     ) -> Self {
@@ -112,6 +117,7 @@ impl Ft8DecodedMessage {
                 receiver_callsign,
                 qso_stage,
                 grid,
+                drift,
             };
         }
 
@@ -194,6 +200,7 @@ impl Ft8DecodedMessage {
             receiver_callsign,
             qso_stage,
             grid,
+            drift,
         }
     }
 

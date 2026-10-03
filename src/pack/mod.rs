@@ -90,7 +90,29 @@ pub fn unpack77(payload: &[u8; 10]) -> Result<Ft8Message, String> {
                     payload: *payload,
                 })
             } else {
-                Err(format!("暂不支持的 i3=0, n3={} 模式", n3))
+                // Type 0.1 (Dxpedition), 0.2 (EuVhf), 0.3/0.4 (ArrlFd) 特种格式覆盖
+                let mut b71 = [0u8; 9];
+                let mut carry = 0u8;
+                for i in 0..9 {
+                    b71[i] = (carry << 7) | (payload[i] >> 1);
+                    carry = payload[i] & 0x01;
+                }
+                let hex_str = b71.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join("");
+                let (prefix, mtype) = match n3 {
+                    1 => ("DXPEDITION", Ft8MessageType::Dxpedition),
+                    2 => ("EU-VHF", Ft8MessageType::EuVhf),
+                    3 | 4 => ("ARRL-FD", Ft8MessageType::ArrlFd),
+                    _ => ("SPECIAL", Ft8MessageType::Unknown),
+                };
+                Ok(Ft8Message {
+                    text: format!("[{}] {}", prefix, hex_str),
+                    msg_type: mtype,
+                    call_to: None,
+                    call_de: None,
+                    extra: None,
+                    i3: 0,
+                    payload: *payload,
+                })
             }
         }
         1 | 2 => {
@@ -186,6 +208,32 @@ pub fn unpack77(payload: &[u8; 10]) -> Result<Ft8Message, String> {
                 call_de: Some(call_de),
                 extra: if extra.is_empty() { None } else { Some(extra) },
                 i3: 4,
+                payload: *payload,
+            })
+        }
+        3 => {
+            // Type 3: ARRL RTTY 特种比赛模式
+            let hex_str = payload.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join("");
+            Ok(Ft8Message {
+                text: format!("[RTTY] {}", hex_str),
+                msg_type: Ft8MessageType::ArrlRtty,
+                call_to: None,
+                call_de: None,
+                extra: None,
+                i3: 3,
+                payload: *payload,
+            })
+        }
+        5 => {
+            // Type 5: WWROF 特种通联模式
+            let hex_str = payload.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join("");
+            Ok(Ft8Message {
+                text: format!("[WWROF] {}", hex_str),
+                msg_type: Ft8MessageType::Wwrof,
+                call_to: None,
+                call_de: None,
+                extra: None,
+                i3: 5,
                 payload: *payload,
             })
         }

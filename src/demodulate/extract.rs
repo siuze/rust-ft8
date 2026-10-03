@@ -21,6 +21,8 @@ pub struct DecodedSignal {
     pub freq: f32,
     /// 时间偏差 (秒，以 0.5s 为基准)
     pub dt: f32,
+    /// 估算的频漂 (Hz, 12.64s 发射期内的漂移量)
+    pub drift: f32,
     /// 估算的信噪比 (dB, 在 2500 Hz 带宽下)
     pub snr: i32,
     /// 79 符号音调序列 (0..7)
@@ -48,8 +50,10 @@ impl SymbolExtractor {
         cd0: &[Complex32],
         ibest: isize,
         f1: f32,
+        drift: f32,
         _sync_quality: f32,
         xbase: f32,
+        deep_search: bool,
     ) -> Option<DecodedSignal> {
         let np2 = 2812isize;
 
@@ -64,6 +68,18 @@ impl SymbolExtractor {
                 let u1 = i1 as usize;
                 buf.copy_from_slice(&cd0[u1..u1 + 32]);
             }
+
+            // 频漂逐符号动态相位旋转补偿：
+            // k 符号时刻相对于中心符号 (k=39) 的瞬时频偏: drift * (k - 39) / 78
+            if drift.abs() > 0.05 {
+                let f_drift_k = drift * ((k as f32) - 39.0) / 78.0;
+                let dphi = -2.0 * std::f32::consts::PI * f_drift_k / 200.0;
+                for j in 0..32 {
+                    let (s, c) = ((j as f32) * dphi).sin_cos();
+                    buf[j] *= Complex32::new(c, s);
+                }
+            }
+
             self.fft_32.process(&mut buf);
 
             for tone in 0..8 {
@@ -207,11 +223,18 @@ impl SymbolExtractor {
             }
         }
 
-        // 第二阶段：若 BP 全部失败，使用 BP 保存的累计 LLR 回退尝试 OSD Order-2 译码 (对标 WSJT-X maxosd=2, norder=2)
+        // 第二阶段：若 BP 全部失败，使用 BP 保存的累计 LLR 回退尝试 OSD 译码 (对标 WSJT-X maxosd)
         if decode_result.is_none() {
-            for llr_pass in &[llra, llrb] {
-                if let Some(dec_res) = decode174_91(llr_pass, 2, OsdDepth::Order2, None) {
-                    if dec_res.hard_errors <= 36 && !dec_res.codeword.iter().all(|&b| b == 0) {
+            let osd_passes: &[&[f32; LDPC_N]] = if deep_search {
+                &[&llra, &llrb, &llrc, &llrd]
+            } else {
+                &[&llra, &llrb]
+            };
+            let max_osd_trials = if deep_search { 3 } else { 2 };
+            for llr_pass in osd_passes {
+                if let Some(dec_res) = decode174_91(llr_pass, max_osd_trials, OsdDepth::Order2, None) {
+                    let max_err = if deep_search { 30 } else { 26 };
+                    if dec_res.hard_errors <= max_err && !dec_res.codeword.iter().all(|&b| b == 0) {
                         decode_result = Some(dec_res);
                         break;
                     }
@@ -230,7 +253,7 @@ impl SymbolExtractor {
 
             let i3 = crate::pack::get_i3(&payload10);
             let n3 = crate::pack::get_n3(&payload10);
-            if i3 > 5 || (i3 == 0 && n3 > 6) || (i3 == 0 && n3 == 2) {
+            if i3 > 5 || (i3 == 0 && n3 > 6) {
                 return None;
             }
 
@@ -238,52 +261,53 @@ impl SymbolExtractor {
                 // 重新构造 79 音调
                 let tones = crate::modulate::ft8_payload_to_tones(&payload10);
 
-                    // 严格 1:1 对标 WSJT-X ft8b.f90 L438-460 SNR 计算
-                    let mut xsig = 0.0f32;
-                    let mut xnoi = 0.0f32;
-                    for i in 0..NUM_SYMBOLS {
-                        let t = tones[i] as usize;
-                        xsig += s8[i][t].powi(2);
-                        let ios = (t + 4) % 7;
-                        xnoi += s8[i][ios].powi(2);
-                    }
-
-                    // 公式 1 (单音偏置噪声基准)
-                    let arg_noi = if xnoi > 1e-12 { (xsig / xnoi) - 1.0 } else { 0.001 };
-                    let mut xsnr_noi = 0.001f32;
-                    if arg_noi > 0.1 {
-                        xsnr_noi = arg_noi;
-                    }
-                    let snr_noi = 10.0 * xsnr_noi.log10() - 27.0;
-
-                    // 公式 2 (全局物理背景谱基准 xbase，彻底免疫强信号旁瓣泄漏与邻道干扰)
-                    let mut snr_f = snr_noi;
-                    if xbase > 1e-12 {
-                        // 包含窗增益与量纲校准 (常数 3.0e6 * 2.754，对准 WSJT-X 官方 ground truth)
-                        let divisor = xbase * 3.0e6 * 2.754;
-                        let arg_base = (xsig / divisor) - 1.0;
-                        if arg_base > 0.1 {
-                            snr_f = 10.0 * arg_base.log10() - 27.0;
-                        }
-                    }
-
-                    if snr_f < -24.0 {
-                        snr_f = -24.0;
-                    }
-
-                    let dt = ((ibest as f32) / 200.0) - 0.5;
-
-                    return Some(DecodedSignal {
-                        message: ft8_msg.text,
-                        freq: f1,
-                        dt,
-                        snr: snr_f.round() as i32,
-                        tones,
-                        hard_errors: dec_res.hard_errors,
-                        decode_type: dec_res.decode_type,
-                    });
+                // 严格 1:1 对标 WSJT-X ft8b.f90 L438-460 SNR 计算
+                let mut xsig = 0.0f32;
+                let mut xnoi = 0.0f32;
+                for i in 0..NUM_SYMBOLS {
+                    let t = tones[i] as usize;
+                    xsig += s8[i][t].powi(2);
+                    let ios = (t + 4) % 7;
+                    xnoi += s8[i][ios].powi(2);
                 }
+
+                // 公式 1 (单音偏置噪声基准)
+                let arg_noi = if xnoi > 1e-12 { (xsig / xnoi) - 1.0 } else { 0.001 };
+                let mut xsnr_noi = 0.001f32;
+                if arg_noi > 0.1 {
+                    xsnr_noi = arg_noi;
+                }
+                let snr_noi = 10.0 * xsnr_noi.log10() - 27.0;
+
+                // 公式 2 (全局物理背景谱基准 xbase，彻底免疫强信号旁瓣泄漏与邻道干扰)
+                let mut snr_f = snr_noi;
+                if xbase > 1e-12 {
+                    // 包含窗增益与量纲校准 (常数 3.0e6 * 2.754，对准 WSJT-X 官方 ground truth)
+                    let divisor = xbase * 3.0e6 * 2.754;
+                    let arg_base = (xsig / divisor) - 1.0;
+                    if arg_base > 0.1 {
+                        snr_f = 10.0 * arg_base.log10() - 27.0;
+                    }
+                }
+
+                if snr_f < -24.0 {
+                    snr_f = -24.0;
+                }
+
+                let dt = ((ibest as f32) / 200.0) - 0.5;
+
+                return Some(DecodedSignal {
+                    message: ft8_msg.text,
+                    freq: f1,
+                    dt,
+                    drift,
+                    snr: snr_f.round() as i32,
+                    tones,
+                    hard_errors: dec_res.hard_errors,
+                    decode_type: dec_res.decode_type,
+                });
             }
+        }
 
             None
         }

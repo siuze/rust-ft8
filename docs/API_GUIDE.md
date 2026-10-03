@@ -103,6 +103,8 @@ pub struct Ft8DecodedMessage {
     pub qso_stage: QsoStage,
     /// 9. 消息中的网格定位 (Maidenhead Grid，如 "OL02"，若无则留空 "")
     pub grid: String,
+    /// 10. 信号频漂 (单位: Hz，在 12.64s 发射期内的频率漂移量)
+    pub drift: f32,
 }
 ```
 
@@ -128,10 +130,12 @@ pub struct Ft8DecodedMessage {
 use rust_ft8::{decode_audio, DecoderConfig, Ft8DecodedMessage};
 
 let config = DecoderConfig {
-    nfa: 100.0,       // 最低搜索频率 (Hz)
-    nfb: 3500.0,      // 最高搜索频率 (Hz)
-    passes: 2,        // 消减搜索轮数 (1:单轮极速, 2:标准推荐, 3:极限挖掘)
-    sync_min: 1.4,    // 同步检测门限 (建议 1.2 ~ 1.8)
+    nfa: 100.0,          // 最低搜索频率 (Hz)
+    nfb: 3500.0,         // 最高搜索频率 (Hz)
+    passes: 2,           // 消减搜索轮数 (1:单轮极速, 2:标准推荐, 3:极限挖掘)
+    sync_min: 1.4,       // 同步检测门限 (建议 1.2 ~ 1.8)
+    deep_search: false,  // 深度搜索模式 (放开 OSD 回溯与全通道度量，降低漏检)
+    enable_drift: true,  // 启用频漂跟踪 (Drift Rate) 与动态调频波形消减
 };
 
 let window_start_offset = -0.9; // 提前 0.9s 录音

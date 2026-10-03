@@ -20,10 +20,14 @@ pub struct DecoderConfig {
     pub nfa: f32,
     /// 搜索最高频率 (Hz)
     pub nfb: f32,
-    /// 消减重搜轮数 (推荐 3 轮对标 WSJT-X)
+    /// 消减重搜轮数 (推荐 2 轮或 3 轮对标 WSJT-X)
     pub passes: usize,
     /// 同步检测初始门限 (推荐 1.4 ~ 1.6)
     pub sync_min: f32,
+    /// 深度搜索模式：放开 OSD 搜索深度与多符号相干通道，大幅提升微弱信号检出率
+    pub deep_search: bool,
+    /// 是否启用频漂跟踪 (Drift Rate) 与动态调频波形消减
+    pub enable_drift: bool,
 }
 
 impl Default for DecoderConfig {
@@ -33,6 +37,8 @@ impl Default for DecoderConfig {
             nfb: 3500.0,
             passes: 2,
             sync_min: 1.4,
+            deep_search: false,
+            enable_drift: true,
         }
     }
 }
@@ -118,7 +124,7 @@ impl Ft8Pipeline {
                 .par_iter()
                 .filter_map(|cand| {
                     let cd0_init = self.downsampler.downsample(&long_fft, cand.freq);
-                    let (_ibest_init, delf, _) = self.searcher.fine_sync(&cd0_init, cand.dt);
+                    let (_ibest_init, delf, _, _) = self.searcher.fine_sync_with_drift(&cd0_init, cand.dt, false);
                     let (cd0, f1) = if delf.abs() < 0.05 {
                         (cd0_init, cand.freq)
                     } else {
@@ -126,20 +132,32 @@ impl Ft8Pipeline {
                         let cd0 = self.downsampler.downsample(&long_fft, f1);
                         (cd0, f1)
                     };
-                    let (ibest, _, sync_pow) = self.searcher.fine_sync(&cd0, cand.dt);
+                    let (ibest, _, drift, sync_pow) = self.searcher.fine_sync_with_drift(&cd0, cand.dt, config.enable_drift);
                     let xbase = baseline.get_xbase(f1);
                     self.extractor
-                        .extract_and_decode(&cd0, ibest, f1, sync_pow, xbase)
+                        .extract_and_decode(&cd0, ibest, f1, drift, sync_pow, xbase, config.deep_search)
                         .map(|sig| (sig, ibest))
                 })
                 .collect();
             let d_dec = t_dec.elapsed().as_secs_f32();
 
-            // 4. 提取本轮新解出信号
+            // 4. 提取本轮新解出信号 (兼顾文本去重与时频近邻冲突抑制)
             let mut new_signals = Vec::new();
             for (sig, ibest) in decoded_candidates {
-                let is_dup = decoded_all.iter().any(|d| d.message == sig.message);
-                if !is_dup {
+                // 完全相同文本去重
+                if decoded_all.iter().any(|d| d.message == sig.message) {
+                    continue;
+                }
+                // 时频近邻冲突抑制 (|Δf| < 8.0 Hz 且 |Δt| < 0.20s)
+                let conflict_idx = decoded_all.iter().position(|d| {
+                    (d.freq - sig.freq).abs() < 8.0 && (d.dt - sig.dt).abs() < 0.20
+                });
+                if let Some(c_idx) = conflict_idx {
+                    if sig.hard_errors < decoded_all[c_idx].hard_errors || sig.snr > decoded_all[c_idx].snr {
+                        decoded_all[c_idx] = sig.clone();
+                        new_signals.push((sig, ibest));
+                    }
+                } else {
                     decoded_all.push(sig.clone());
                     new_signals.push((sig, ibest));
                 }
@@ -159,6 +177,7 @@ impl Ft8Pipeline {
                             self.subtracter.reconstruct_waveform_with_buf(
                                 &sig.tones,
                                 sig.freq,
+                                sig.drift,
                                 *ibest,
                                 &working_audio,
                                 bufs,
@@ -208,10 +227,11 @@ impl Ft8Pipeline {
         raw_signals
             .into_iter()
             .map(|sig| {
-                crate::demodulate::message::Ft8DecodedMessage::parse(
+                crate::demodulate::message::Ft8DecodedMessage::parse_with_drift(
                     sig.dt,
                     sig.snr,
                     sig.freq,
+                    sig.drift,
                     &sig.message,
                     window_start_offset,
                 )

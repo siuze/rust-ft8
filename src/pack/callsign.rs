@@ -226,7 +226,11 @@ pub fn unpack28(n28: u32, ip: u8, i3: u8) -> Result<String, String> {
     }
 
     // 3. 标准呼号解包
-    let mut n = n28_rem - MAX22;
+    let n_base = n28_rem - MAX22;
+    if n_base >= 262417410 {
+        return Err(format!("n28 超出标准呼号范围: {}", n_base));
+    }
+    let mut n = n_base;
     let mut c6 = [b' '; 6];
 
     c6[5] = CHARS_27[(n % 27) as usize];
@@ -240,6 +244,11 @@ pub fn unpack28(n28: u32, ip: u8, i3: u8) -> Result<String, String> {
     c6[1] = CHARS_36[(n % 36) as usize];
     n /= 36;
     c6[0] = CHARS_37[(n % 37) as usize];
+
+    // 严谨的 ITU 呼号分区数字检查：标准呼号必在第 2 位或第 3 位包含数字 (0..9)
+    if !c6[2].is_ascii_digit() && !(c6[1].is_ascii_digit() && c6[0] == b' ') {
+        return Err(format!("非法的呼号结构 (缺少分区数字): {:?}", c6));
+    }
 
     let mut result = String::new();
 

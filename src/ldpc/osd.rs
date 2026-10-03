@@ -92,9 +92,8 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
 
     // 4. 二元高斯消元法将前 91 列化为单位矩阵 I_91
     for id in 0..LDPC_K {
-        let max_col = (id + 20).min(LDPC_N);
         let mut pivot_col = None;
-        for col in id..max_col {
+        for col in id..LDPC_N {
             if gen_mrb[id][col] == 1 {
                 pivot_col = Some(col);
                 break;
