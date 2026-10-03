@@ -228,7 +228,7 @@ cargo build --release --bins
 | 项目名称 | 源码仓库地址 | 主要作者 / 组织 | 开源许可证 | 说明与关系 |
 | :--- | :--- | :--- | :---: | :--- |
 | **WSJT-X** | [github.com/WSJTX/wsjtx/releases](https://github.com/WSJTX/wsjtx/releases) | Joe Taylor (K1JT), Steve Franke (K9AN) 等 | **GPL-3.0** | FT8 协议的原创项目与官方 Fortran 参考实现。本项目的协议规范与 77-bit 报文定义均以此为基准。 |
-| **wsjtx-lib** | 社区独立抽取包装库 | 业余无线电开源社区 | **GPL-3.0** | 早期将 WSJT-X 算法核心剥离出的独立 C++ 包装库（本项目测试集使用的 `cli_decode.exe` 基于此构建）。注意：该独立库未集成 WSJT-X 2.6/2.7 引入的动态 AP 先验译码逻辑。 |
+| **wsjtx-lib** | [github.com/paulh002/wsjtx_lib](https://github.com/paulh002/wsjtx_lib) | 业余无线电开源社区 | **GPL-3.0** | 早期将 WSJT-X 算法核心剥离出的独立 C++ 包装库（本项目测试集使用的 `cli_decode.exe` 基于此构建）。注意：该独立库未集成 WSJT-X 2.6/2.7 引入的动态 AP 先验译码逻辑。 |
 | **ft8_lib** | [github.com/kg4sgp/ft8_lib](https://github.com/kg4sgp/ft8_lib) | Karlis Goba (YL3JG) | **MIT** | 微控制器轻量 C 语言库。本项目测试集中的 14 组 WAV 样本及参考消息直接引用自该项目的测试用例。 |
 | **JTDX Improved** | [sourceforge.net/projects/jtdx-improved](https://sourceforge.net/projects/jtdx-improved/) | JTDX 社区 / Igor Chernikov 等 | **GPL-3.0** | 衍生版本，其多步滤波与微弱信号处理逻辑为本项目提供了算法设计参考。 |
 | **JS8Call** | [github.com/jjs/js8call](https://github.com/jjs/js8call) | Jordan Sherer (KN4CRD) | **GPL-3.0** | 基于 FT8 调制的文本通信软件，其网状分包与心跳应答设计为本项目的扩展通信设计提供了参考。 |
