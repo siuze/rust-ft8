@@ -7,19 +7,75 @@ pub const CRC_POLYNOMIAL: u16 = 0x2757;
 pub const CRC_WIDTH: usize = 14;
 pub const CRC_MASK: u16 = (1 << CRC_WIDTH) - 1; // 0x3FFF
 
-/// 对字节序列前 `num_bits` 个比特计算 14-bit CRC
-/// 字节序列以 MSB 优先排列
-pub fn compute_crc14(message: &[u8], num_bits: usize) -> u16 {
-    let mut remainder: u16 = 0;
-    let mut idx_byte = 0;
-
-    for idx_bit in 0..num_bits {
-        if idx_bit % 8 == 0 {
-            remainder ^= (message[idx_byte] as u16) << (CRC_WIDTH - 8);
-            idx_byte += 1;
+/// 编译期生成的 14-bit CRC 查找表 (256 项)
+pub const CRC14_TABLE: [u16; 256] = {
+    let mut table = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut rem = (i as u16) << 6; // 14 - 8 = 6
+        let mut bit = 0;
+        while bit < 8 {
+            if (rem & (1 << 13)) != 0 {
+                rem = (rem << 1) ^ CRC_POLYNOMIAL;
+            } else {
+                rem <<= 1;
+            }
+            bit += 1;
         }
+        table[i] = rem & CRC_MASK;
+        i += 1;
+    }
+    table
+};
 
-        if (remainder & (1 << (CRC_WIDTH - 1))) != 0 {
+/// 快速查表计算 14-bit CRC
+pub fn compute_crc14(message: &[u8], num_bits: usize) -> u16 {
+    let full_bytes = num_bits / 8;
+    let rem_bits = num_bits % 8;
+
+    let mut remainder: u16 = 0;
+    let mut i = 0;
+    while i < full_bytes && i < message.len() {
+        let top = ((remainder >> 6) as u8) ^ message[i];
+        remainder = ((remainder & 0x003F) << 8) ^ CRC14_TABLE[top as usize];
+        i += 1;
+    }
+
+    if rem_bits > 0 && i < message.len() {
+        let last_byte = message[i];
+        for b in 0..rem_bits {
+            let bit = (last_byte >> (7 - b)) & 1;
+            remainder ^= (bit as u16) << (CRC_WIDTH - 1);
+            if (remainder & (1 << (CRC_WIDTH - 1))) != 0 {
+                remainder = (remainder << 1) ^ CRC_POLYNOMIAL;
+            } else {
+                remainder <<= 1;
+            }
+        }
+    }
+
+    remainder & CRC_MASK
+}
+
+/// 专门对 77-bit 载荷（末尾补 5 个 0 扩展至 82-bit）进行极速查表计算
+#[inline]
+pub fn compute_crc14_payload77(payload10: &[u8; 10]) -> u16 {
+    let mut remainder: u16 = 0;
+    let mut i = 0;
+    // 前 9 字节全部有效
+    while i < 9 {
+        let top = ((remainder >> 6) as u8) ^ payload10[i];
+        remainder = ((remainder & 0x003F) << 8) ^ CRC14_TABLE[top as usize];
+        i += 1;
+    }
+    // 第 10 字节的高 5 位有效 (bits 72..76)，低 3 位必须为 0
+    let b9 = payload10[9] & 0xF8;
+    let top = ((remainder >> 6) as u8) ^ b9;
+    remainder = ((remainder & 0x003F) << 8) ^ CRC14_TABLE[top as usize];
+
+    // 末尾补 5 个 0 达到 82 位，相当于对 80 位后的 2 个 0 进行多项式除法步进
+    for _ in 0..2 {
+        if (remainder & (1 << 13)) != 0 {
             remainder = (remainder << 1) ^ CRC_POLYNOMIAL;
         } else {
             remainder <<= 1;
@@ -33,16 +89,13 @@ pub fn compute_crc14(message: &[u8], num_bits: usize) -> u16 {
 /// 输入参数 `bits77` 为每个元素 0 或 1 的长度为 77 的切片
 pub fn compute_crc14_from_bits(bits77: &[u8]) -> u16 {
     assert!(bits77.len() >= 77, "bits77 长度必须至少为 77");
-    
-    // 转换为 11 字节流，前 77 位有效，补 5 个 0 达到 82 位
-    let mut bytes = [0u8; 11];
+    let mut bytes = [0u8; 10];
     for i in 0..77 {
         if bits77[i] != 0 {
             bytes[i / 8] |= 1 << (7 - (i % 8));
         }
     }
-    // 82 位计算
-    compute_crc14(&bytes, 82)
+    compute_crc14_payload77(&bytes)
 }
 
 /// 对 77 比特有效载荷（以 10 字节存储，最后 3 位为 0）追加 14 位 CRC，生成 91 位（以 12 字节存储）

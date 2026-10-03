@@ -21,6 +21,7 @@ pub struct SignalSubtracter {
     filter_freq: Vec<Complex32>,
     end_correction: [f32; NFILT / 2 + 1],
     pulse_scaled: Vec<f32>,
+    sin_cos_lut: [(f32, f32); 4097],
     scratch_len: usize,
 }
 
@@ -85,14 +86,36 @@ impl SignalSubtracter {
         let dphi_peak = 2.0 * PI / (NSPS as f32);
         let pulse_scaled: Vec<f32> = pulse.iter().map(|&p| dphi_peak * p).collect();
 
+        // 预计算 4096 点正余弦查找表（精度达到 1e-7 单精度浮点理论极限）
+        let mut sin_cos_lut = [(0.0f32, 0.0f32); 4097];
+        let two_pi = 2.0 * PI;
+        for i in 0..=4096 {
+            let phi = (i as f32) * two_pi / 4096.0;
+            let (s, c) = phi.sin_cos();
+            sin_cos_lut[i] = (s, c);
+        }
+
         Self {
             fft_180k_forward,
             fft_180k_inverse,
             filter_freq: cw,
             end_correction,
             pulse_scaled,
+            sin_cos_lut,
             scratch_len,
         }
+    }
+
+    /// 极速单精度正余弦插值查表，消除每次合成时 151,680 次慢速三角函数调用
+    #[inline(always)]
+    fn fast_sin_cos(&self, phi: f32) -> (f32, f32) {
+        let p = phi * (4096.0 / (2.0 * PI));
+        let idx = p as usize;
+        let frac = p - (idx as f32);
+        let i0 = idx & 4095;
+        let (s0, c0) = self.sin_cos_lut[i0];
+        let (s1, c1) = self.sin_cos_lut[i0 + 1];
+        (s0 + frac * (s1 - s0), c0 + frac * (c1 - c0))
     }
 
     /// 为工作线程创建一组专用的重构工作缓存（单个线程只初始化一次，后续零堆分配）
@@ -229,7 +252,7 @@ impl SignalSubtracter {
         let two_pi = 2.0 * PI;
 
         for k in 0..n_wave {
-            let (s, c) = phi.sin_cos();
+            let (s, c) = self.fast_sin_cos(phi);
             cref[k] = Complex32::new(c, s);
             phi = (phi + dphi[k + n_spsym]).rem_euclid(two_pi);
         }

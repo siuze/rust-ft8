@@ -59,6 +59,14 @@ impl Downsampler {
     /// 从预先计算的全长频域数据 `long_fft` 中，提取指定载频 `f0` 的 200 Hz 基带信号
     /// 输出 3200 点复数基带序列 `c1`
     pub fn downsample(&self, long_fft: &[Complex32], f0: f32) -> Vec<Complex32> {
+        let mut c1 = vec![Complex32::new(0.0, 0.0); NFFT2];
+        self.downsample_to_slice(long_fft, f0, &mut c1);
+        c1
+    }
+
+    /// 零堆分配的高性能下采样版本，将结果写入调用者提供的 `out` 切片（长度至少为 3200）
+    pub fn downsample_to_slice(&self, long_fft: &[Complex32], f0: f32, out: &mut [Complex32]) {
+        assert!(out.len() >= NFFT2, "缓冲区长度必须至少为 3200");
         let df = 12000.0 / (NFFT1 as f32); // 0.0625 Hz
         let baud = 12000.0 / (NSPS as f32); // 6.25 Hz
 
@@ -68,15 +76,15 @@ impl Downsampler {
         let fb = f0 - 1.5 * baud;
         let ib = ((fb / df).round() as isize).max(1);
 
-        let mut c1 = vec![Complex32::new(0.0, 0.0); NFFT2];
+        out[..NFFT2].fill(Complex32::new(0.0, 0.0));
         if ib > it {
-            return c1;
+            return;
         }
 
         let mut k = 0usize;
         for i in ib..=it {
             if i >= 0 && (i as usize) < long_fft.len() {
-                c1[k] = long_fft[i as usize];
+                out[k] = long_fft[i as usize];
             }
             k += 1;
         }
@@ -84,28 +92,26 @@ impl Downsampler {
         // 两端施加 100 点余弦平滑锥度
         if k > 100 {
             for i in 0..=100 {
-                c1[i] *= self.taper[100 - i];
+                out[i] *= self.taper[100 - i];
             }
             for i in 0..=100 {
                 if k > i + 1 {
-                    c1[k - 1 - i] *= self.taper[i];
+                    out[k - 1 - i] *= self.taper[i];
                 }
             }
         }
 
         // 循环位移，使 f0 对准直流 0 Hz (对应 Fortran cshift)
         let shift = (i0 - ib) as usize % NFFT2;
-        c1.rotate_left(shift);
+        out[..NFFT2].rotate_left(shift);
 
         // 3200 点 IFFT 逆变换回时域
-        self.fft2_inverse.process(&mut c1);
+        self.fft2_inverse.process(&mut out[..NFFT2]);
 
         // 幅度归一化
-        for s in c1.iter_mut() {
+        for s in out[..NFFT2].iter_mut() {
             *s *= self.norm_fac;
         }
-
-        c1
     }
 }
 

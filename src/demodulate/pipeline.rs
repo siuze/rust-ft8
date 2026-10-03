@@ -6,9 +6,10 @@
 //! 3. 多符号相干 LLR 提取与混合 LDPC 译码
 //! 4. 强信号时域重构与残差消减，激活多 Pass 弱信号深挖
 
+use num_complex::Complex32;
 use rayon::prelude::*;
 use super::baseline::BaselineEstimator;
-use super::downsample::{Downsampler, NMAX};
+use super::downsample::{Downsampler, NMAX, NFFT2};
 use super::extract::{DecodedSignal, SymbolExtractor};
 use super::subtract::SignalSubtracter;
 use super::sync::SyncSearcher;
@@ -137,22 +138,26 @@ impl Ft8Pipeline {
             let t_dec = std::time::Instant::now();
             let decoded_candidates: Vec<(DecodedSignal, isize)> = candidates
                 .par_iter()
-                .filter_map(|cand| {
-                    let cd0_init = self.downsampler.downsample(&long_fft, cand.freq);
-                    let (_ibest_init, delf, _, _) = self.searcher.fine_sync_with_drift(&cd0_init, cand.dt, false);
-                    let (cd0, f1) = if delf.abs() < 0.05 {
-                        (cd0_init, cand.freq)
-                    } else {
-                        let f1 = cand.freq + delf;
-                        let cd0 = self.downsampler.downsample(&long_fft, f1);
-                        (cd0, f1)
-                    };
-                    let (ibest, _, drift, sync_pow) = self.searcher.fine_sync_with_drift(&cd0, cand.dt, config.enable_drift);
-                    let xbase = baseline.get_xbase(f1);
-                    self.extractor
-                        .extract_and_decode(&cd0, ibest, f1, drift, sync_pow, xbase, config.deep_search)
-                        .map(|sig| (sig, ibest))
-                })
+                .map_init(
+                    || (vec![Complex32::new(0.0, 0.0); NFFT2], vec![Complex32::new(0.0, 0.0); NFFT2]),
+                    |(cd0_buf, cd1_buf), cand| {
+                        self.downsampler.downsample_to_slice(&long_fft, cand.freq, cd0_buf);
+                        let (_ibest_init, delf, _, _) = self.searcher.fine_sync_with_drift(cd0_buf, cand.dt, false);
+                        let (cd0, f1) = if delf.abs() < 0.05 {
+                            (&*cd0_buf, cand.freq)
+                        } else {
+                            let f1 = cand.freq + delf;
+                            self.downsampler.downsample_to_slice(&long_fft, f1, cd1_buf);
+                            (&*cd1_buf, f1)
+                        };
+                        let (ibest, _, drift, sync_pow) = self.searcher.fine_sync_with_drift(cd0, cand.dt, config.enable_drift);
+                        let xbase = baseline.get_xbase(f1);
+                        self.extractor
+                            .extract_and_decode(cd0, ibest, f1, drift, sync_pow, xbase, config.deep_search)
+                            .map(|sig| (sig, ibest))
+                    },
+                )
+                .flatten()
                 .collect();
             let d_dec = t_dec.elapsed().as_secs_f32();
 

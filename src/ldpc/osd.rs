@@ -7,7 +7,6 @@
 
 use super::constants::*;
 use super::encoder::encode174_bits;
-use crate::crc::check_crc14_bits;
 
 /// OSD 译码深度配置
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +52,50 @@ pub fn get_generator_matrix() -> &'static [[u8; LDPC_N]; LDPC_K] {
     })
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct BitWord174 {
+    pub w: [u64; 3],
+}
+
+impl BitWord174 {
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self { w: [0, 0, 0] }
+    }
+
+    #[inline(always)]
+    pub fn get_bit(&self, idx: usize) -> u8 {
+        let word = idx / 64;
+        let shift = idx % 64;
+        ((self.w[word] >> shift) & 1) as u8
+    }
+
+    #[inline(always)]
+    pub fn set_bit(&mut self, idx: usize) {
+        let word = idx / 64;
+        let shift = idx % 64;
+        self.w[word] |= 1u64 << shift;
+    }
+
+    #[inline(always)]
+    pub fn toggle_bit(&mut self, idx: usize) {
+        let word = idx / 64;
+        let shift = idx % 64;
+        self.w[word] ^= 1u64 << shift;
+    }
+
+    #[inline(always)]
+    pub fn xor(&self, other: &Self) -> Self {
+        Self {
+            w: [
+                self.w[0] ^ other.w[0],
+                self.w[1] ^ other.w[1],
+                self.w[2] ^ other.w[2],
+            ],
+        }
+    }
+}
+
 /// 执行 LDPC(174, 91) 顺序统计量译码 (OSD)
 ///
 /// # 参数
@@ -83,10 +126,12 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
     });
 
     // 3. 构建重排生成矩阵 gen_mrb (K x N = 91 x 174)
-    let mut gen_mrb = [[0u8; LDPC_N]; LDPC_K];
+    let mut gen_mrb = [BitWord174::new(); LDPC_K];
     for r in 0..LDPC_K {
         for c in 0..LDPC_N {
-            gen_mrb[r][c] = gen[r][indices[c]];
+            if gen[r][indices[c]] != 0 {
+                gen_mrb[r].set_bit(c);
+            }
         }
     }
 
@@ -94,7 +139,7 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
     for id in 0..LDPC_K {
         let mut pivot_col = None;
         for col in id..LDPC_N {
-            if gen_mrb[id][col] == 1 {
+            if gen_mrb[id].get_bit(col) != 0 {
                 pivot_col = Some(col);
                 break;
             }
@@ -102,48 +147,53 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
 
         if let Some(col) = pivot_col {
             if col != id {
-                // 交换列 id 与 col
                 for r in 0..LDPC_K {
-                    let tmp = gen_mrb[r][id];
-                    gen_mrb[r][id] = gen_mrb[r][col];
-                    gen_mrb[r][col] = tmp;
+                    let b1 = gen_mrb[r].get_bit(id);
+                    let b2 = gen_mrb[r].get_bit(col);
+                    if b1 != b2 {
+                        gen_mrb[r].toggle_bit(id);
+                        gen_mrb[r].toggle_bit(col);
+                    }
                 }
                 indices.swap(id, col);
             }
 
             // 对其他所有行消元
+            let pivot_row = gen_mrb[id];
             for r in 0..LDPC_K {
-                if r != id && gen_mrb[r][id] == 1 {
-                    for c in 0..LDPC_N {
-                        gen_mrb[r][c] ^= gen_mrb[id][c];
-                    }
+                if r != id && gen_mrb[r].get_bit(id) != 0 {
+                    gen_mrb[r] = gen_mrb[r].xor(&pivot_row);
                 }
             }
         }
     }
 
-    // 5. 0 阶最可靠比特基向量 m0
-    let mut m0 = [0u8; LDPC_K];
-    for i in 0..LDPC_K {
-        m0[i] = if llr[indices[i]] >= 0.0 { 1 } else { 0 };
+    // 5. 0 阶最可靠比特基向量 m0 与 0 阶码字 c0
+    let mut c0 = BitWord174::new();
+    for r in 0..LDPC_K {
+        if llr[indices[r]] >= 0.0 {
+            c0 = c0.xor(&gen_mrb[r]);
+        }
     }
 
-    // 计算 0 阶码字 c0 (在重排空间)
-    let mut c0 = [0u8; LDPC_N];
-    c0[..LDPC_K].copy_from_slice(&m0);
-    for col in LDPC_K..LDPC_N {
-        let mut sum = 0u8;
-        for row in 0..LDPC_K {
-            sum ^= m0[row] & gen_mrb[row][col];
+    // 预计算前 91 个原信息位在重排空间中的位置映射 (用于 CRC 快速早筛)
+    // 转换为连续平铺字节数组，发挥 CPU 顺序读写与自动向量化能力
+    let mut gen_bytes = [[0u8; LDPC_N]; LDPC_K];
+    for r in 0..LDPC_K {
+        for c in 0..LDPC_N {
+            gen_bytes[r][c] = gen_mrb[r].get_bit(c);
         }
-        c0[col] = sum;
+    }
+    let mut c0_bytes = [0u8; LDPC_N];
+    for c in 0..LDPC_N {
+        c0_bytes[c] = c0.get_bit(c);
     }
 
     let mut best_result: Option<OsdResult> = None;
     let mut min_soft_dist = f32::MAX;
 
     // --- Order 0 评估 ---
-    check_candidate(&c0, &indices, &hdec, llr, 0, &mut best_result, &mut min_soft_dist);
+    check_candidate(&c0_bytes, &indices, &hdec, llr, 0, &mut best_result, &mut min_soft_dist);
     if depth == OsdDepth::Order0 && best_result.is_some() {
         return best_result;
     }
@@ -151,9 +201,10 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
     // --- Order 1 评估 (单比特翻转) ---
     if depth as usize >= 1 {
         for i1 in 0..LDPC_K {
-            let mut c1 = c0;
+            let mut c1 = c0_bytes;
+            let g1 = &gen_bytes[i1];
             for c in 0..LDPC_N {
-                c1[c] ^= gen_mrb[i1][c];
+                c1[c] ^= g1[c];
             }
             check_candidate(&c1, &indices, &hdec, llr, 1, &mut best_result, &mut min_soft_dist);
         }
@@ -162,10 +213,16 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
     // --- Order 2 评估 (双比特翻转) ---
     if depth as usize >= 2 {
         for i1 in 0..LDPC_K {
+            let mut c0_i1 = c0_bytes;
+            let g1 = &gen_bytes[i1];
+            for c in 0..LDPC_N {
+                c0_i1[c] ^= g1[c];
+            }
             for i2 in (i1 + 1)..LDPC_K {
-                let mut c2 = c0;
+                let mut c2 = c0_i1;
+                let g2 = &gen_bytes[i2];
                 for c in 0..LDPC_N {
-                    c2[c] ^= gen_mrb[i1][c] ^ gen_mrb[i2][c];
+                    c2[c] ^= g2[c];
                 }
                 check_candidate(&c2, &indices, &hdec, llr, 2, &mut best_result, &mut min_soft_dist);
             }
@@ -175,7 +232,7 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
     best_result
 }
 
-#[inline]
+#[inline(always)]
 fn check_candidate(
     cw_mrb: &[u8; LDPC_N],
     indices: &[usize; LDPC_N],
@@ -185,15 +242,22 @@ fn check_candidate(
     best_result: &mut Option<OsdResult>,
     min_soft_dist: &mut f32,
 ) {
-    // 重排回原始比特次序
+    // 重排回原始比特次序 (连续顺序读、随机写)
     let mut orig_cw = [0u8; LDPC_N];
     for (mrb_idx, &orig_idx) in indices.iter().enumerate() {
         orig_cw[orig_idx] = cw_mrb[mrb_idx];
     }
 
-    // 校验 CRC14
-    if check_crc14_bits(&orig_cw[..LDPC_K]) {
-        // 计算软距离
+    // 提取接收到的 14-bit CRC
+    let mut rx_crc = 0u16;
+    for i in 0..14 {
+        rx_crc = (rx_crc << 1) | (orig_cw[77 + i] as u16);
+    }
+
+    // 采用 256 表项查表法极速计算 77 比特载荷 CRC
+    let calc_crc = crate::crc::compute_crc14_from_bits(&orig_cw[..77]);
+    if calc_crc == rx_crc {
+        // CRC 校验成功！计算软距离
         let mut soft_dist = 0.0f32;
         let mut hard_errors = 0;
         for i in 0..LDPC_N {
@@ -207,6 +271,7 @@ fn check_candidate(
             *min_soft_dist = soft_dist;
             let mut message91 = [0u8; LDPC_K];
             message91.copy_from_slice(&orig_cw[..LDPC_K]);
+
             let mut message77 = [0u8; 77];
             message77.copy_from_slice(&orig_cw[..77]);
 

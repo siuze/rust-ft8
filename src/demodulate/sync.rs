@@ -354,93 +354,166 @@ impl SyncSearcher {
 
     #[inline(always)]
     fn calc_sync8d(&self, cd0: &[Complex32], i0: isize, twk: Option<&[Complex32; 32]>, np2: isize) -> f32 {
-        let mut sync = 0.0f32;
+        let max_idx = i0 + 72 * 32 + 32;
+        // 快速无分支路径：在 99% 的有效信号时段均满足
+        if i0 >= 0 && max_idx <= np2 && (max_idx as usize) <= cd0.len() {
+            let mut sync = 0.0f32;
+            for i in 0..7 {
+                let u1 = (i0 + (i as isize) * 32) as usize;
+                let u2 = u1 + 36 * 32;
+                let u3 = u1 + 72 * 32;
 
-        for i in 0..7 {
-            let i1 = i0 + (i as isize) * 32;
-            let i2 = i1 + 36 * 32;
-            let i3 = i1 + 72 * 32;
+                let mut z1 = Complex32::new(0.0, 0.0);
+                let mut z2 = Complex32::new(0.0, 0.0);
+                let mut z3 = Complex32::new(0.0, 0.0);
 
-            let mut z1 = Complex32::new(0.0, 0.0);
-            let mut z2 = Complex32::new(0.0, 0.0);
-            let mut z3 = Complex32::new(0.0, 0.0);
+                let s1 = &cd0[u1..u1 + 32];
+                let s2 = &cd0[u2..u2 + 32];
+                let s3 = &cd0[u3..u3 + 32];
+                let c_row = &self.cos_table[i];
 
-            for j in 0..32 {
-                let ref_val = match twk {
-                    Some(table) => self.cos_table[i][j] * table[j],
-                    None => self.cos_table[i][j],
-                };
-
-                let idx1 = i1 + (j as isize);
-                if idx1 >= 0 && idx1 < np2 && (idx1 as usize) < cd0.len() {
-                    z1 += cd0[idx1 as usize] * ref_val.conj();
+                match twk {
+                    Some(table) => {
+                        for j in 0..32 {
+                            let ref_val = c_row[j] * table[j];
+                            let conj_ref = ref_val.conj();
+                            z1 += s1[j] * conj_ref;
+                            z2 += s2[j] * conj_ref;
+                            z3 += s3[j] * conj_ref;
+                        }
+                    }
+                    None => {
+                        for j in 0..32 {
+                            let conj_ref = c_row[j].conj();
+                            z1 += s1[j] * conj_ref;
+                            z2 += s2[j] * conj_ref;
+                            z3 += s3[j] * conj_ref;
+                        }
+                    }
                 }
-                let idx2 = i2 + (j as isize);
-                if idx2 >= 0 && idx2 < np2 && (idx2 as usize) < cd0.len() {
-                    z2 += cd0[idx2 as usize] * ref_val.conj();
-                }
-                let idx3 = i3 + (j as isize);
-                if idx3 >= 0 && idx3 < np2 && (idx3 as usize) < cd0.len() {
-                    z3 += cd0[idx3 as usize] * ref_val.conj();
-                }
+
+                sync += z1.norm_sqr() + z2.norm_sqr() + z3.norm_sqr();
             }
+            sync
+        } else {
+            // 边缘 fallback 路径
+            let mut sync = 0.0f32;
+            for i in 0..7 {
+                let i1 = i0 + (i as isize) * 32;
+                let i2 = i1 + 36 * 32;
+                let i3 = i1 + 72 * 32;
 
-            sync += z1.norm_sqr() + z2.norm_sqr() + z3.norm_sqr();
+                let mut z1 = Complex32::new(0.0, 0.0);
+                let mut z2 = Complex32::new(0.0, 0.0);
+                let mut z3 = Complex32::new(0.0, 0.0);
+
+                for j in 0..32 {
+                    let ref_val = match twk {
+                        Some(table) => self.cos_table[i][j] * table[j],
+                        None => self.cos_table[i][j],
+                    };
+
+                    let idx1 = i1 + (j as isize);
+                    if idx1 >= 0 && idx1 < np2 && (idx1 as usize) < cd0.len() {
+                        z1 += cd0[idx1 as usize] * ref_val.conj();
+                    }
+                    let idx2 = i2 + (j as isize);
+                    if idx2 >= 0 && idx2 < np2 && (idx2 as usize) < cd0.len() {
+                        z2 += cd0[idx2 as usize] * ref_val.conj();
+                    }
+                    let idx3 = i3 + (j as isize);
+                    if idx3 >= 0 && idx3 < np2 && (idx3 as usize) < cd0.len() {
+                        z3 += cd0[idx3 as usize] * ref_val.conj();
+                    }
+                }
+
+                sync += z1.norm_sqr() + z2.norm_sqr() + z3.norm_sqr();
+            }
+            sync
         }
-
-        sync
     }
 
     #[inline(always)]
     fn calc_sync8d_drift(&self, cd0: &[Complex32], i0: isize, delf: f32, drift: f32, np2: isize) -> f32 {
         let dt2 = 1.0 / 200.0f32;
-        let mut sync = 0.0f32;
 
-        // 3 组 Costas 块分别施加对应的瞬时频偏:
-        // 块 1 (0..6): delf
-        // 块 2 (36..42): delf + 0.5 * drift
-        // 块 3 (72..78): delf + drift
+        // 预先计算 3 组 Costas 块的 32 点频偏旋转因子（消除内层 672 次 sin_cos 调用）
         let dphi1 = 2.0 * PI * delf * dt2;
         let dphi2 = 2.0 * PI * (delf + 0.5 * drift) * dt2;
         let dphi3 = 2.0 * PI * (delf + drift) * dt2;
 
-        for i in 0..7 {
-            let i1 = i0 + (i as isize) * 32;
-            let i2 = i1 + 36 * 32;
-            let i3 = i1 + 72 * 32;
-
-            let mut z1 = Complex32::new(0.0, 0.0);
-            let mut z2 = Complex32::new(0.0, 0.0);
-            let mut z3 = Complex32::new(0.0, 0.0);
-
-            for j in 0..32 {
-                let (s1, c1) = ((j as f32) * dphi1).sin_cos();
-                let ref1 = self.cos_table[i][j] * Complex32::new(c1, s1);
-
-                let (s2, c2) = ((j as f32) * dphi2).sin_cos();
-                let ref2 = self.cos_table[i][j] * Complex32::new(c2, s2);
-
-                let (s3, c3) = ((j as f32) * dphi3).sin_cos();
-                let ref3 = self.cos_table[i][j] * Complex32::new(c3, s3);
-
-                let idx1 = i1 + (j as isize);
-                if idx1 >= 0 && idx1 < np2 && (idx1 as usize) < cd0.len() {
-                    z1 += cd0[idx1 as usize] * ref1.conj();
-                }
-                let idx2 = i2 + (j as isize);
-                if idx2 >= 0 && idx2 < np2 && (idx2 as usize) < cd0.len() {
-                    z2 += cd0[idx2 as usize] * ref2.conj();
-                }
-                let idx3 = i3 + (j as isize);
-                if idx3 >= 0 && idx3 < np2 && (idx3 as usize) < cd0.len() {
-                    z3 += cd0[idx3 as usize] * ref3.conj();
-                }
-            }
-
-            sync += z1.norm_sqr() + z2.norm_sqr() + z3.norm_sqr();
+        let mut rot1 = [Complex32::new(0.0, 0.0); 32];
+        let mut rot2 = [Complex32::new(0.0, 0.0); 32];
+        let mut rot3 = [Complex32::new(0.0, 0.0); 32];
+        for j in 0..32 {
+            let (s1, c1) = ((j as f32) * dphi1).sin_cos();
+            rot1[j] = Complex32::new(c1, s1);
+            let (s2, c2) = ((j as f32) * dphi2).sin_cos();
+            rot2[j] = Complex32::new(c2, s2);
+            let (s3, c3) = ((j as f32) * dphi3).sin_cos();
+            rot3[j] = Complex32::new(c3, s3);
         }
 
-        sync
+        let max_idx = i0 + 72 * 32 + 32;
+        if i0 >= 0 && max_idx <= np2 && (max_idx as usize) <= cd0.len() {
+            let mut sync = 0.0f32;
+            for i in 0..7 {
+                let u1 = (i0 + (i as isize) * 32) as usize;
+                let u2 = u1 + 36 * 32;
+                let u3 = u1 + 72 * 32;
+
+                let s1 = &cd0[u1..u1 + 32];
+                let s2 = &cd0[u2..u2 + 32];
+                let s3 = &cd0[u3..u3 + 32];
+                let c_row = &self.cos_table[i];
+
+                let mut z1 = Complex32::new(0.0, 0.0);
+                let mut z2 = Complex32::new(0.0, 0.0);
+                let mut z3 = Complex32::new(0.0, 0.0);
+
+                for j in 0..32 {
+                    z1 += s1[j] * (c_row[j] * rot1[j]).conj();
+                    z2 += s2[j] * (c_row[j] * rot2[j]).conj();
+                    z3 += s3[j] * (c_row[j] * rot3[j]).conj();
+                }
+
+                sync += z1.norm_sqr() + z2.norm_sqr() + z3.norm_sqr();
+            }
+            sync
+        } else {
+            let mut sync = 0.0f32;
+            for i in 0..7 {
+                let i1 = i0 + (i as isize) * 32;
+                let i2 = i1 + 36 * 32;
+                let i3 = i1 + 72 * 32;
+
+                let mut z1 = Complex32::new(0.0, 0.0);
+                let mut z2 = Complex32::new(0.0, 0.0);
+                let mut z3 = Complex32::new(0.0, 0.0);
+
+                for j in 0..32 {
+                    let ref1 = self.cos_table[i][j] * rot1[j];
+                    let ref2 = self.cos_table[i][j] * rot2[j];
+                    let ref3 = self.cos_table[i][j] * rot3[j];
+
+                    let idx1 = i1 + (j as isize);
+                    if idx1 >= 0 && idx1 < np2 && (idx1 as usize) < cd0.len() {
+                        z1 += cd0[idx1 as usize] * ref1.conj();
+                    }
+                    let idx2 = i2 + (j as isize);
+                    if idx2 >= 0 && idx2 < np2 && (idx2 as usize) < cd0.len() {
+                        z2 += cd0[idx2 as usize] * ref2.conj();
+                    }
+                    let idx3 = i3 + (j as isize);
+                    if idx3 >= 0 && idx3 < np2 && (idx3 as usize) < cd0.len() {
+                        z3 += cd0[idx3 as usize] * ref3.conj();
+                    }
+                }
+
+                sync += z1.norm_sqr() + z2.norm_sqr() + z3.norm_sqr();
+            }
+            sync
+        }
     }
 }
 

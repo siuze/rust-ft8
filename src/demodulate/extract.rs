@@ -124,7 +124,7 @@ impl SymbolExtractor {
                 let mut k = 0usize;
                 while k < 29 {
                     let ks = if ihalf == 0 { k + 7 } else { k + 43 };
-                    let mut s2 = vec![0.0f32; nt];
+                    let mut s2 = [0.0f32; 512];
 
                     for i in 0..nt {
                         let i1 = (i / 64) & 7;
@@ -164,7 +164,7 @@ impl SymbolExtractor {
                         let mut max_one = f32::MIN;
                         let mut max_zero = f32::MIN;
 
-                        for (i, &val) in s2.iter().enumerate() {
+                        for (i, &val) in s2[..nt].iter().enumerate() {
                             if ((i >> bit_pos) & 1) != 0 {
                                 if val > max_one {
                                     max_one = val;

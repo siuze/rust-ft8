@@ -58,6 +58,53 @@ pub fn fast_atanh(x: f32) -> f32 {
     }
 }
 
+// 编译期预计算的拓扑映射表：消除变量与校验节点消息传递时的线性查找
+const LDPC_NM_TO_MN_SLOT: [[usize; 7]; LDPC_M] = {
+    let mut table = [[0usize; 7]; LDPC_M];
+    let mut j = 0;
+    while j < LDPC_M {
+        let nr = LDPC_NUM_ROWS[j] as usize;
+        let mut i = 0;
+        while i < nr {
+            let ibj = (LDPC_NM[j][i] - 1) as usize;
+            let mut kk = 0;
+            while kk < 3 {
+                if (LDPC_MN[ibj][kk] - 1) as usize == j {
+                    table[j][i] = kk;
+                    break;
+                }
+                kk += 1;
+            }
+            i += 1;
+        }
+        j += 1;
+    }
+    table
+};
+
+const LDPC_MN_TO_NM_SLOT: [[usize; 3]; LDPC_N] = {
+    let mut table = [[0usize; 3]; LDPC_N];
+    let mut j = 0;
+    while j < LDPC_N {
+        let mut i = 0;
+        while i < 3 {
+            let ichk = (LDPC_MN[j][i] - 1) as usize;
+            let nr = LDPC_NUM_ROWS[ichk] as usize;
+            let mut k = 0;
+            while k < nr {
+                if (LDPC_NM[ichk][k] - 1) as usize == j {
+                    table[j][i] = k;
+                    break;
+                }
+                k += 1;
+            }
+            i += 1;
+        }
+        j += 1;
+    }
+    table
+};
+
 /// 执行 LDPC(174, 91) 置信传播 (BP) 译码
 ///
 /// # 参数
@@ -166,42 +213,44 @@ pub fn bp_decode(
             nclast = ncheck;
         }
 
-        // 5. 变量节点向校验节点传递消息 (toc)
+        // 5. 变量节点向校验节点传递消息 (toc)，通过静态映射表直接索引
         for j in 0..LDPC_M {
             let nr = LDPC_NUM_ROWS[j] as usize;
             for i in 0..nr {
                 let ibj = (LDPC_NM[j][i] - 1) as usize;
-                let mut t = zn[ibj];
-                // 扣除本校验节点上一次传递给该变量节点的消息
-                for kk in 0..3 {
-                    if (LDPC_MN[ibj][kk] - 1) as usize == j {
-                        t -= tov[ibj][kk];
-                        break;
-                    }
-                }
-                toc[j][i] = t;
+                let slot = LDPC_NM_TO_MN_SLOT[j][i];
+                toc[j][i] = zn[ibj] - tov[ibj][slot];
             }
         }
 
-        // 6. 校验节点向变量节点传递消息 (tov)
+        // 6. 校验节点向变量节点传递消息 (tov)，通过前缀/后缀积实现 O(1) 连乘
+        let mut prod_except_k = [[1.0f32; 7]; LDPC_M];
         for j in 0..LDPC_M {
             let nr = LDPC_NUM_ROWS[j] as usize;
             for i in 0..nr {
                 tanhtoc[j][i] = fast_tanh(-toc[j][i] / 2.0);
+            }
+
+            let mut prefix = [1.0f32; 8];
+            let mut suffix = [1.0f32; 8];
+            for k in 0..nr {
+                prefix[k + 1] = prefix[k] * tanhtoc[j][k];
+            }
+            let mut k = nr;
+            while k > 0 {
+                suffix[k - 1] = suffix[k] * tanhtoc[j][k - 1];
+                k -= 1;
+            }
+            for k in 0..nr {
+                prod_except_k[j][k] = prefix[k] * suffix[k + 1];
             }
         }
 
         for j in 0..LDPC_N {
             for i in 0..3 {
                 let ichk = (LDPC_MN[j][i] - 1) as usize;
-                let nr = LDPC_NUM_ROWS[ichk] as usize;
-                let mut tmn = 1.0f32;
-                for k in 0..nr {
-                    let neighbor_bit = (LDPC_NM[ichk][k] - 1) as usize;
-                    if neighbor_bit != j {
-                        tmn *= tanhtoc[ichk][k];
-                    }
-                }
+                let k_slot = LDPC_MN_TO_NM_SLOT[j][i];
+                let tmn = prod_except_k[ichk][k_slot];
                 tov[j][i] = 2.0 * fast_atanh(-tmn);
             }
         }
