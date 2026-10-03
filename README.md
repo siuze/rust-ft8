@@ -228,7 +228,7 @@ pub struct DecoderConfig {
 在 `Cargo.toml` 中添加依赖：
 ```toml
 [dependencies]
-rust-ft8 = "0.1.0"
+rust-ft8 = "0.2.0"
 ```
 
 ### 1. 音频文件离线解码 (支持同步阻塞模式与增量实时流出模式)
