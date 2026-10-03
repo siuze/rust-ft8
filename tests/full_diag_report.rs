@@ -40,7 +40,8 @@ fn normalize_msg(s: &str) -> String {
     let n = parts.len().min(3);
     let mut norm = Vec::new();
     for &p in &parts[..n] {
-        if p.starts_with('<') && p.ends_with('>') {
+        // Hash calls may be rendered as either <...> or <HASH>[HINT].
+        if p.starts_with('<') && p.contains('>') {
             norm.push("<...>");
         } else {
             norm.push(p);
@@ -247,7 +248,7 @@ fn test_generate_full_diagnostic_report() {
     println!("- 参考基准总消息数:  {} 条", total_gt_count);
     println!("- 实际解出总消息数:  {} 条", total_dec_count);
     println!("- 成功匹配消息数:    {} 条", n_matched);
-    println!("- 漏解 (未解出) 数:  {} 条", n_missed);
+    println!("- 参考未匹配数:      {} 条", n_missed);
     println!("- 多解 (基准外) 数:  {} 条", n_extra);
     println!("- 召回率 (Recall):   {:.2}%", recall);
     println!("- 精确率 (Precision):{:.2}%", precision);
@@ -299,22 +300,14 @@ fn test_generate_full_diagnostic_report() {
     }
 
     println!("\n==========================================================================================");
-    println!("三、未解码出来 (漏解 / Missed) 信号明细与特征归纳 (共 {} 条)", n_missed);
+    println!("三、参考未匹配记录明细 (共 {} 条)", n_missed);
     println!("==========================================================================================");
-    println!("| {:<14} | {:<6} | {:<7} | {:<7} | {:<28} | 特征说明与漏解成因分析 |",
+    println!("| {:<14} | {:<6} | {:<7} | {:<7} | {:<28} | 核查状态 |",
         "来源样本", "频率", "参考SNR", "参考DT", "参考消息内容"
     );
     println!("|----------------|--------|---------|---------|------------------------------|------------------------|");
     for (src, sig) in &global_missed {
-        let reason = if sig.snr <= -20 {
-            "极限微弱信号 (SNR <= -20dB)，接近 FT8 物理理论极限"
-        } else if sig.snr <= -15 {
-            "深度弱信号 (SNR -15~-19dB)，可能被相邻强信号阻带旁瓣压制"
-        } else if sig.freq < 300.0 || sig.freq > 3000.0 {
-            "频带边缘信号，受到前端带通滤波器边带衰减影响"
-        } else {
-            "时频重叠冲突或相干多径干扰"
-        };
+        let reason = "待单信号探针核查";
         println!("| {:<14} | {:4.0}Hz | {:+3} dB | {:+5.2}s | {:<28} | {} |",
             src, sig.freq, sig.snr, sig.dt, sig.message, reason
         );
@@ -328,7 +321,7 @@ fn test_generate_full_diagnostic_report() {
     );
     println!("|----------------|--------|---------|---------|------------------------------|------------------------|");
     for (src, sig) in &global_extra {
-        println!("| {:<14} | {:4.0}Hz | {:+3} dB | {:+5.2}s | {:<28} | 多轮相干消减挖掘出的真实合法信号 |",
+        println!("| {:<14} | {:4.0}Hz | {:+3} dB | {:+5.2}s | {:<28} | 未在参考文本中，真实性待核查 |",
             src, sig.freq, sig.snr, sig.dt, sig.message
         );
     }

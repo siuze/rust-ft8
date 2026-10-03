@@ -175,44 +175,28 @@ impl Ft8Pipeline {
                 .collect();
             let d_dec = t_dec.elapsed().as_secs_f32();
 
-            // 4. 提取本轮新解出信号 (兼顾文本去重与时频近邻冲突抑制)
+            // 4. 提取本轮新解出信号。不同报文即使时频接近，也可能是独立发射。
             let mut new_signals = Vec::new();
             for (sig, ibest) in decoded_candidates {
-                // 完全相同文本去重
+                // 与参考解码器保持一致：同一时隙内按完整报文去重。
                 if decoded_all.iter().any(|d| d.message == sig.message) {
                     continue;
                 }
-                // 时频近邻冲突抑制 (|Δf| < 8.0 Hz 且 |Δt| < 0.20s)
-                let conflict_idx = decoded_all.iter().position(|d| {
-                    (d.freq - sig.freq).abs() < 8.0 && (d.dt - sig.dt).abs() < 0.20
-                });
-                let mut is_new = false;
-                if let Some(c_idx) = conflict_idx {
-                    if sig.hard_errors < decoded_all[c_idx].hard_errors || sig.snr > decoded_all[c_idx].snr {
-                        decoded_all[c_idx] = sig.clone();
-                        new_signals.push((sig.clone(), ibest));
-                        is_new = true;
-                    }
-                } else {
-                    decoded_all.push(sig.clone());
-                    new_signals.push((sig.clone(), ibest));
-                    is_new = true;
-                }
+                decoded_all.push(sig.clone());
+                new_signals.push((sig.clone(), ibest));
 
                 // 若有新解出的有效信号，且注册了即时回调，立即构造成结构化消息通知外部 (无需等待后续 Pass 和消减计算)！
-                if is_new {
-                    if let Some(ref mut cb) = callback {
-                        let struct_msg = crate::demodulate::message::Ft8DecodedMessage::parse_with_sequence(
-                            sig.dt,
-                            sig.snr,
-                            sig.freq,
-                            sig.drift,
-                            &sig.message,
-                            window_start_offset,
-                            sequence_id,
-                        );
-                        cb(&struct_msg);
-                    }
+                if let Some(ref mut cb) = callback {
+                    let struct_msg = crate::demodulate::message::Ft8DecodedMessage::parse_with_sequence(
+                        sig.dt,
+                        sig.snr,
+                        sig.freq,
+                        sig.drift,
+                        &sig.message,
+                        window_start_offset,
+                        sequence_id,
+                    );
+                    cb(&struct_msg);
                 }
             }
             let pass_new_decodes = new_signals.len();

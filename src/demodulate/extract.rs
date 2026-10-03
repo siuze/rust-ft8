@@ -9,7 +9,9 @@ use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
 use crate::constants::{COSTAS_PATTERN, GRAY_MAP, NUM_SYMBOLS};
-use crate::ldpc::{decode174_91, DecodeType, OsdDepth, LDPC_N};
+use crate::ldpc::{
+    bp_decode, decode174_91_after_bp_failure, DecodeResult, DecodeType, OsdDepth, LDPC_N,
+};
 use crate::pack::unpack77;
 
 /// 解调解码成功结果
@@ -213,13 +215,23 @@ impl SymbolExtractor {
         // 第一阶段：优先在全部 4 种相干组合中运行 BP 译码 (无假阳性风险)
         let passes = [llra, llrb, llrc, llrd];
         let mut decode_result = None;
+        let mut failed_bp: [Option<Vec<[f32; LDPC_N]>>; 4] = std::array::from_fn(|_| None);
 
-        for llr_pass in &passes {
-            if let Some(dec_res) = decode174_91(llr_pass, -1, OsdDepth::Order0, None) {
-                if dec_res.hard_errors <= 36 && !dec_res.codeword.iter().all(|&b| b == 0) {
-                    decode_result = Some(dec_res);
-                    break;
+        for (channel, llr_pass) in passes.iter().enumerate() {
+            match bp_decode(llr_pass, 30, None) {
+                Ok(bp_res) => {
+                    if bp_res.hard_errors <= 36 && !bp_res.codeword.iter().all(|&b| b == 0) {
+                        decode_result = Some(DecodeResult {
+                            message77: bp_res.message77,
+                            message91: bp_res.message91,
+                            codeword: bp_res.codeword,
+                            hard_errors: bp_res.hard_errors,
+                            decode_type: DecodeType::Bp,
+                        });
+                        break;
+                    }
                 }
+                Err(z_save) => failed_bp[channel] = Some(z_save),
             }
         }
 
@@ -228,14 +240,16 @@ impl SymbolExtractor {
             // 准入条件：同步符号匹配度至少达到门限，彻底杜绝纯噪声假峰触发 4095 次高开销矩阵搜索
             let min_nsync_for_osd = if deep_search { 7 } else { 9 };
             if nsync >= min_nsync_for_osd {
-                let osd_passes: &[&[f32; LDPC_N]] = if deep_search {
-                    &[&llra, &llrb]
-                } else {
-                    &[&llra]
-                };
+                let osd_channels = if deep_search { 2 } else { 1 };
                 let max_osd_trials = if deep_search { 2 } else { 1 };
-                for llr_pass in osd_passes {
-                    if let Some(dec_res) = decode174_91(llr_pass, max_osd_trials, OsdDepth::Order2, None) {
+                for channel in 0..osd_channels {
+                    let Some(ref z_save) = failed_bp[channel] else { continue };
+                    if let Some(dec_res) = decode174_91_after_bp_failure(
+                        &passes[channel],
+                        z_save,
+                        max_osd_trials,
+                        OsdDepth::Order2,
+                    ) {
                         let max_err = if deep_search { 30 } else { 26 };
                         if dec_res.hard_errors <= max_err && !dec_res.codeword.iter().all(|&b| b == 0) {
                             decode_result = Some(dec_res);

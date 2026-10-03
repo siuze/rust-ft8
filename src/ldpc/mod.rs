@@ -71,49 +71,41 @@ pub fn decode174_91(
             if max_osd < 0 {
                 return None;
             }
-
-            // 2. BP 未收敛，回退至 OSD 译码
-            if max_osd == 0 {
-                // 使用原始通道 LLR 进行 OSD
-                if let Some(osd_res) = osd_decode(llr, depth) {
-                    return Some(DecodeResult {
-                        message77: osd_res.message77,
-                        message91: osd_res.message91,
-                        codeword: osd_res.codeword,
-                        hard_errors: osd_res.hard_errors,
-                        decode_type: DecodeType::Osd,
-                    });
-                }
-            } else {
-                // 使用 BP 迭代过程保存的累计 LLR 进行 OSD
-                let trials = (max_osd as usize).min(z_save.len());
-                for i in 0..trials {
-                    if let Some(osd_res) = osd_decode(&z_save[i], depth) {
-                        return Some(DecodeResult {
-                            message77: osd_res.message77,
-                            message91: osd_res.message91,
-                            codeword: osd_res.codeword,
-                            hard_errors: osd_res.hard_errors,
-                            decode_type: DecodeType::Osd,
-                        });
-                    }
-                }
-                // 若累计 LLR 为空，回退尝试原始 LLR
-                if trials == 0 {
-                    if let Some(osd_res) = osd_decode(llr, depth) {
-                        return Some(DecodeResult {
-                            message77: osd_res.message77,
-                            message91: osd_res.message91,
-                            codeword: osd_res.codeword,
-                            hard_errors: osd_res.hard_errors,
-                            decode_type: DecodeType::Osd,
-                        });
-                    }
-                }
-            }
-
-            None
+            decode174_91_after_bp_failure(llr, &z_save, max_osd, depth)
         }
+    }
+}
+
+/// Reuse the posterior LLR snapshots returned by a failed BP run for OSD.
+/// This avoids repeating BP when several soft channels are tried before OSD.
+pub(crate) fn decode174_91_after_bp_failure(
+    llr: &[f32; LDPC_N],
+    z_save: &[[f32; LDPC_N]],
+    max_osd: isize,
+    depth: OsdDepth,
+) -> Option<DecodeResult> {
+    if max_osd < 0 {
+        return None;
+    }
+    let trials = if max_osd == 0 { 0 } else { (max_osd as usize).min(z_save.len()) };
+    if trials == 0 {
+        return osd_decode(llr, depth).map(osd_result_to_decode_result);
+    }
+    for posterior in z_save.iter().take(trials) {
+        if let Some(result) = osd_decode(posterior, depth) {
+            return Some(osd_result_to_decode_result(result));
+        }
+    }
+    None
+}
+
+fn osd_result_to_decode_result(result: OsdResult) -> DecodeResult {
+    DecodeResult {
+        message77: result.message77,
+        message91: result.message91,
+        codeword: result.codeword,
+        hard_errors: result.hard_errors,
+        decode_type: DecodeType::Osd,
     }
 }
 

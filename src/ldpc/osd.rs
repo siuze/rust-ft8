@@ -188,12 +188,21 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
     for c in 0..LDPC_N {
         c0_bytes[c] = c0.get_bit(c);
     }
+    // CRC needs only the 91 systematic information bits. Map them into the
+    // reliability-ordered codeword once, rather than unshuffling 174 bits for
+    // every one of the Order 2 candidates.
+    let mut info_positions = [0usize; LDPC_K];
+    for (mrb_idx, &orig_idx) in indices.iter().enumerate() {
+        if orig_idx < LDPC_K {
+            info_positions[orig_idx] = mrb_idx;
+        }
+    }
 
     let mut best_result: Option<OsdResult> = None;
     let mut min_soft_dist = f32::MAX;
 
     // --- Order 0 评估 ---
-    check_candidate(&c0_bytes, &indices, &hdec, llr, 0, &mut best_result, &mut min_soft_dist);
+    check_candidate(&c0_bytes, &indices, &info_positions, &hdec, llr, 0, &mut best_result, &mut min_soft_dist);
     if depth == OsdDepth::Order0 && best_result.is_some() {
         return best_result;
     }
@@ -206,7 +215,7 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
             for c in 0..LDPC_N {
                 c1[c] ^= g1[c];
             }
-            check_candidate(&c1, &indices, &hdec, llr, 1, &mut best_result, &mut min_soft_dist);
+            check_candidate(&c1, &indices, &info_positions, &hdec, llr, 1, &mut best_result, &mut min_soft_dist);
         }
     }
 
@@ -224,7 +233,7 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
                 for c in 0..LDPC_N {
                     c2[c] ^= g2[c];
                 }
-                check_candidate(&c2, &indices, &hdec, llr, 2, &mut best_result, &mut min_soft_dist);
+                check_candidate(&c2, &indices, &info_positions, &hdec, llr, 2, &mut best_result, &mut min_soft_dist);
             }
         }
     }
@@ -236,27 +245,31 @@ pub fn osd_decode(llr: &[f32; LDPC_N], depth: OsdDepth) -> Option<OsdResult> {
 fn check_candidate(
     cw_mrb: &[u8; LDPC_N],
     indices: &[usize; LDPC_N],
+    info_positions: &[usize; LDPC_K],
     hdec: &[u8; LDPC_N],
     llr: &[f32; LDPC_N],
     order: usize,
     best_result: &mut Option<OsdResult>,
     min_soft_dist: &mut f32,
 ) {
-    // 重排回原始比特次序 (连续顺序读、随机写)
-    let mut orig_cw = [0u8; LDPC_N];
-    for (mrb_idx, &orig_idx) in indices.iter().enumerate() {
-        orig_cw[orig_idx] = cw_mrb[mrb_idx];
+    let mut message91 = [0u8; LDPC_K];
+    for (bit, &mrb_idx) in info_positions.iter().enumerate() {
+        message91[bit] = cw_mrb[mrb_idx];
     }
 
     // 提取接收到的 14-bit CRC
     let mut rx_crc = 0u16;
     for i in 0..14 {
-        rx_crc = (rx_crc << 1) | (orig_cw[77 + i] as u16);
+        rx_crc = (rx_crc << 1) | (message91[77 + i] as u16);
     }
 
     // 采用 256 表项查表法极速计算 77 比特载荷 CRC
-    let calc_crc = crate::crc::compute_crc14_from_bits(&orig_cw[..77]);
+    let calc_crc = crate::crc::compute_crc14_from_bits(&message91[..77]);
     if calc_crc == rx_crc {
+        let mut orig_cw = [0u8; LDPC_N];
+        for (mrb_idx, &orig_idx) in indices.iter().enumerate() {
+            orig_cw[orig_idx] = cw_mrb[mrb_idx];
+        }
         // CRC 校验成功！计算软距离
         let mut soft_dist = 0.0f32;
         let mut hard_errors = 0;
@@ -269,11 +282,8 @@ fn check_candidate(
 
         if soft_dist < *min_soft_dist {
             *min_soft_dist = soft_dist;
-            let mut message91 = [0u8; LDPC_K];
-            message91.copy_from_slice(&orig_cw[..LDPC_K]);
-
             let mut message77 = [0u8; 77];
-            message77.copy_from_slice(&orig_cw[..77]);
+            message77.copy_from_slice(&message91[..77]);
 
             *best_result = Some(OsdResult {
                 message77,
