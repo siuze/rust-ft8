@@ -7,3 +7,9 @@
 *.a
 *.tar.gz
 ft8_decode_aarch64
+*.token
+*.key
+*.log
+*.wav
+.env*
+credentials.toml

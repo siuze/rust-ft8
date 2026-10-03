@@ -4,6 +4,20 @@ version = "0.1.0"
 edition = "2021"
 authors = ["YES-ESP-DX Team"]
 description = "A pure-Rust, highly accurate FT8 codec library matching WSJT-X and JTDX performance"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/BG5VDH/Rust-FT8"
+keywords = ["ft8", "amateur-radio", "dsp", "demodulator", "wsjtx"]
+categories = ["multimedia::audio", "algorithms", "science"]
+exclude = [
+    "reference/**",
+    "jtdx/**",
+    "*.wav",
+    "*.tar.gz",
+    "build_rk.sh",
+    "sync_and_test.sh",
+    "*.log",
+]
 
 [dependencies]
 rustfft = "6.4.1"
