@@ -221,7 +221,9 @@ pub struct DecoderConfig {
 
 ## 六、快速开始与代码示例
 
-> 完整 API 接入指南与函数参考请参阅 [docs/API_GUIDE.md](docs/API_GUIDE.md)。
+> - 完整 API 接入指南与函数参考：[docs/API_GUIDE.md](docs/API_GUIDE.md)
+> - 性能优化与架构革新详解白皮书：[docs/PERFORMANCE_OPTIMIZATION.md](docs/PERFORMANCE_OPTIMIZATION.md)
+> - 基准测试与多平台真值对比运行指南：[docs/BENCHMARK_AND_COMPARISON_GUIDE.md](docs/BENCHMARK_AND_COMPARISON_GUIDE.md)
 
 在 `Cargo.toml` 中添加依赖：
 ```toml
