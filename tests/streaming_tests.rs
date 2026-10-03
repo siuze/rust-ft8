@@ -96,7 +96,7 @@ fn test_streaming_early_decoding_websdr_test1() {
 
     assert!(preamble_seen, "必须成功捕获前导码");
     assert!(early_decodes.len() >= 10, "提前解码期至少应解出 10 条强信号");
-    assert!(final_decodes.len() >= 16, "全量输出至少应解出 16 条信号");
+    assert!(final_decodes.len() >= 14, "全量输出至少应解出 14 条合法信号");
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn test_streaming_finish_with_last_chunk() {
     });
 
     assert!(got_finish, "必须收到 DecodeFinished 事件");
-    assert!(decoded_count >= 16, "提前结束解码应能顺利解出至少 16 条信号");
+    assert!(decoded_count >= 14, "提前结束解码应能顺利解出至少 14 条合法信号");
     assert!(receiver.is_cycle_finished(), "接收器状态必须已完成");
 }
 

@@ -63,25 +63,29 @@ fn test_structured_decoder_with_window_offset() {
         ..Default::default()
     };
 
-    // 假设调用者提前 0.9s 开始录音，传入 window_start_offset = -0.9
+    // 假设调用者提前 0.9s 开始录音，传入 window_start_offset = -0.9，并携带任务序列号 888888
     let offset = -0.9f32;
+    let seq_id = 888888u64;
     let mut messages: Vec<Ft8DecodedMessage> = Vec::new();
 
-    // 测试回调句柄接口
-    pipeline.decode_with_callback(&audio, &config, offset, |msg| {
-        messages.push(msg);
+    // 测试回调句柄接口 (模式二：增量实时流出)
+    let final_msgs = pipeline.decode_with_callback(&audio, &config, offset, seq_id, |msg| {
+        assert_eq!(msg.sequence_id, seq_id, "回调中的消息应携带传入的 sequence_id");
+        messages.push(msg.clone());
     });
 
     assert!(!messages.is_empty(), "应成功解出信号");
-    println!("\n解出 {} 条结构化信号 (已应用 -0.9s 窗口时间校正):", messages.len());
+    assert_eq!(final_msgs.len(), messages.len(), "回调收集总数应与最终返回总数一致");
+    println!("\n解出 {} 条结构化信号 (已应用 -0.9s 窗口时间校正, sequence_id={}):", messages.len(), seq_id);
 
     let mut found_cq = false;
     let mut found_directed = false;
 
     for m in &messages {
+        assert_eq!(m.sequence_id, seq_id, "消息 sequence_id 必须匹配");
         println!(
-            "[{:5.0}Hz] DT:{:+5.2}s SNR:{:+3}dB | 发送方: {:8} 归属: {:10} ({:6}) | 接收方: {:8} | 阶段: {:?} 网格: {}",
-            m.freq, m.dt, m.snr, m.sender_callsign, m.country, m.country_cn, m.receiver_callsign, m.qso_stage, m.grid
+            "[{:5.0}Hz] DT:{:+5.2}s SNR:{:+3}dB | seq:{} | 发送方: {:8} 归属: {:10} ({:6}) | 接收方: {:8} | 阶段: {:?} 网格: {}",
+            m.freq, m.dt, m.snr, m.sequence_id, m.sender_callsign, m.country, m.country_cn, m.receiver_callsign, m.qso_stage, m.grid
         );
 
         // 验证 9 项字段完整性
@@ -117,8 +121,9 @@ fn test_streaming_decoder_with_callback() {
         ..Default::default()
     };
 
-    // 使用带 -0.9s 偏移的流式接收机
-    let mut receiver = StreamingFt8Receiver::with_window_offset(config, -0.9);
+    let test_stream_seq = 100200300u64;
+    // 使用带 -0.9s 偏移和 sequence_id 的流式接收机
+    let mut receiver = StreamingFt8Receiver::with_window_offset_and_seq(config, -0.9, test_stream_seq);
     let chunk_size = 1920; // 160ms
     let mut early_count = 0;
     let mut final_count = 0;
@@ -129,20 +134,27 @@ fn test_streaming_decoder_with_callback() {
             StreamDecodedEvent::PreambleDetected { active_frequencies, time_sec } => {
                 println!("[流式 {:.2}s] 前导锁定频点: {} 个", time_sec, active_frequencies.len());
             }
-            StreamDecodedEvent::EarlyDecoded { signals, time_sec } => {
-                println!("[流式 {:.2}s] 提前解码成功! 收到 {} 条信号", time_sec, signals.len());
+            StreamDecodedEvent::EarlyDecoded { signals, time_sec, sequence_id } => {
+                assert_eq!(sequence_id, test_stream_seq);
+                println!("[流式 {:.2}s] 提前解码成功! 收到 {} 条信号 (seq={})", time_sec, signals.len(), sequence_id);
                 early_count += signals.len();
                 for s in &signals {
+                    assert_eq!(s.sequence_id, test_stream_seq);
                     println!("    提前: {} (DT={:+.2}s)", s.message, s.dt);
                 }
             }
-            StreamDecodedEvent::CycleCompleted { all_signals, time_sec } => {
-                println!("[流式 {:.2}s] 全时隙扫尾完成! 共 {} 条信号", time_sec, all_signals.len());
+            StreamDecodedEvent::CycleCompleted { all_signals, time_sec, sequence_id } => {
+                assert_eq!(sequence_id, test_stream_seq);
+                println!("[流式 {:.2}s] 全时隙扫尾完成! 共 {} 条信号 (seq={})", time_sec, all_signals.len(), sequence_id);
                 final_count += all_signals.len();
+                for s in &all_signals {
+                    assert_eq!(s.sequence_id, test_stream_seq);
+                }
             }
-            StreamDecodedEvent::DecodeFinished { total_signals, audio_duration_sec, is_last_chunk } => {
+            StreamDecodedEvent::DecodeFinished { total_signals, audio_duration_sec, is_last_chunk, sequence_id } => {
+                assert_eq!(sequence_id, test_stream_seq);
                 finished_seen = true;
-                println!("[流式 {:.2}s] 本轮解码结束通知: 总计 {} 条信号 (最后一帧={})", audio_duration_sec, total_signals, is_last_chunk);
+                println!("[流式 {:.2}s] 本轮解码结束通知: 总计 {} 条信号 (最后一帧={}, seq={})", audio_duration_sec, total_signals, is_last_chunk, sequence_id);
             }
         });
     }
@@ -203,3 +215,67 @@ fn test_dxcc_translation_and_distance() {
     let bearing = great_circle_bearing(lat_bj, lon_bj, lat_sh, lon_sh);
     assert!(bearing > 120.0 && bearing < 180.0, "实际航向: {}°", bearing);
 }
+
+#[test]
+fn test_two_modes_sync_vs_callback_with_seq() {
+    let wav_path = "reference/ft8_lib/test/wav/websdr_test1.wav";
+    let (audio, _) = read_wav_file(wav_path).expect("读取测试音频失败");
+
+    let config = DecoderConfig {
+        nfa: 100.0,
+        nfb: 3500.0,
+        passes: 2,
+        sync_min: 1.4,
+        ..Default::default()
+    };
+
+    // 模式一：完全阻塞同步解码
+    let seq_sync = 123456789u64;
+    let sync_results = rust_ft8::decode_audio(&audio, &config, 0.0, seq_sync);
+    assert!(!sync_results.is_empty(), "模式一同步解码应解出信号");
+    for msg in &sync_results {
+        assert_eq!(msg.sequence_id, seq_sync, "模式一返回结果必须携带指定 sequence_id");
+    }
+
+    // 模式二：实时增量回调流出解码
+    let seq_cb = 987654321u64;
+    let mut cb_received = Vec::new();
+    let cb_final = rust_ft8::decode_audio_with_callback(&audio, &config, 0.0, seq_cb, |msg| {
+        assert_eq!(msg.sequence_id, seq_cb, "模式二实时回调中必须携带指定 sequence_id");
+        cb_received.push(msg.clone());
+    });
+
+    assert_eq!(cb_received.len(), cb_final.len(), "回调收集条数必须与最终返回列表条数一致");
+    assert_eq!(sync_results.len(), cb_final.len(), "模式一与模式二解出信号数量必须一致");
+    for (m_sync, m_cb) in sync_results.iter().zip(cb_final.iter()) {
+        assert_eq!(m_sync.message, m_cb.message, "两种模式解出的消息内容必须一致");
+        assert_eq!(m_sync.freq, m_cb.freq);
+    }
+}
+
+#[test]
+fn test_wsjtx_false_decode_rejection() {
+    use rust_ft8::pack::callsign::unpack28;
+    use rust_ft8::pack::grid::unpack_grid_report;
+
+    // 1. 验证呼号语法合法性防误解机制：
+    // 合法呼号：必须是第2或第3位为数字，数字之后必须全为字母 (如 "BG5VDH")
+    let valid_bg5 = unpack28(75359253, 0, 1).expect("合法呼号应成功");
+    println!("合法呼号解码: {}", valid_bg5);
+
+    // 2. 验证超过 262,417,410 的无效 n_base (即 N28 >= 268,675,306) 必须直接被拦截拒绝
+    let invalid_n28 = 262_417_410 + 2063592 + 4194304 + 100;
+    assert!(unpack28(invalid_n28, 0, 1).is_err(), "超限 N28 必须被判定为非法拒绝");
+
+    // 3. 验证网格大区防误解机制：
+    // 网格前两位字母必须在 A..=R 范围内
+    let valid_grid = unpack_grid_report(3245, 0);
+    println!("有效网格: {}", valid_grid);
+    assert!(!valid_grid.is_empty());
+
+    // 4. 验证信号报告在 [-30, +30] dB 物理合法区间 (MAXGRID4=32400, 0dB 对应 32400+35)
+    let report_legal = unpack_grid_report(32400 + 35, 0);
+    println!("0dB 报告: {}", report_legal);
+    assert_eq!(report_legal, "+00");
+}
+

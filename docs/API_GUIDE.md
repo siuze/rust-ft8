@@ -76,7 +76,7 @@ let audio: Vec<f32> = encode_message_to_audio(message, f0, sample_rate, delay_se
 
 ### 2.1 结构化输出消息定义 (`Ft8DecodedMessage`)
 
-每个解码输出的对象均包含用户所需的 9 大维度完整字段：
+每个解码输出的对象均包含用户所需的 11 大维度完整字段，其中 `sequence_id` 用于工程流水线与上位机精准关联任务上下文：
 
 ```rust
 pub struct Ft8DecodedMessage {
@@ -105,51 +105,131 @@ pub struct Ft8DecodedMessage {
     pub grid: String,
     /// 10. 信号频漂 (单位: Hz，在 12.64s 发射期内的频率漂移量)
     pub drift: f32,
+    /// 11. 请求序列号 (uint64，由调用者传入，透传至每个解码产物中)
+    pub sequence_id: u64,
 }
 ```
 
-#### 通联阶段枚举 (`QsoStage`)
-- `QsoStage::BroadcastCq`：广播 CQ（如 `CQ BD4SUR OM99`）
-- `QsoStage::DirectedCall`：定向呼叫应答（如 `BD4SUR VR2XYZ OL02`，呼叫对方并带己方网格）
-- `QsoStage::ReportSNR`：初次上报信号报告（如 `VR2XYZ BD4SUR -10` 或 `+05`）
-- `QsoStage::ReportSNRWithR`：回复确认并上报信号报告（如 `BD4SUR VR2XYZ R-08`）
-- `QsoStage::Confirmation`：收到报告并确认（如 `RRR` 或 `RR73`）
-- `QsoStage::Finished73`：通联圆满结束（如 `73`）
-- `QsoStage::FreeText`：自由文本聊天
-- `QsoStage::Unknown`：其他未知
-
 ---
 
-### 2.2 正常单段音频离线解码函数 (含窗口起始点偏移校正)
+### 2.2 离线解码两种工作模式 (含窗口起始点偏移与序列号)
 
-当用户有一段录音（如 12~15 秒的 WAV 或 PCM 数组）时调用。支持传入 `window_start_offset`。
+离线解码提供两种满足不同业务场景的设计模式：
 
-> **应用场景**：为了解析可能提前发射的信号，调用者通常会以“当前时间窗口 $-0.9\text{s}$”作为录音的开始时间。此时传入 `window_start_offset = -0.9`，函数会自动将所有信号的相对延迟校准为相对于真实 15 秒时隙窗口的时间差（即 $\text{DT}_{真实} = \text{DT}_{录音} - 0.9$）。
+#### 模式一：完全阻塞同步解码 (一次性返回全量结果)
+- **函数**：`rust_ft8::decode_audio(audio, config, window_start_offset, sequence_id)`
+- **特点**：函数内部跑完配置的所有 Pass（例如 2 轮或 3 轮消减与弱信号挖掘），完成所有信号的按频率排序和去重后，一次性返回 `Vec<Ft8DecodedMessage>`。
+- **适用场景**：批处理分析、WAV 文件离线扫描、无需实时界面的脚本测试。
 
 ```rust
 use rust_ft8::{decode_audio, DecoderConfig, Ft8DecodedMessage};
 
-let config = DecoderConfig {
-    nfa: 100.0,          // 最低搜索频率 (Hz)
-    nfb: 3500.0,         // 最高搜索频率 (Hz)
-    passes: 2,           // 消减搜索轮数 (1:单轮极速, 2:标准推荐, 3:极限挖掘)
-    sync_min: 1.4,       // 同步检测门限 (建议 1.2 ~ 1.8)
-    deep_search: false,  // 深度搜索模式 (放开 OSD 回溯与全通道度量，降低漏检)
-    enable_drift: true,  // 启用频漂跟踪 (Drift Rate) 与动态调频波形消减
-};
+let config = DecoderConfig::default();
+let window_start_offset = -0.9f32; // 提前 0.9 秒录音校准
+let sequence_id = 1001u64;         // 调用者自定义任务序列号
 
-let window_start_offset = -0.9; // 提前 0.9s 录音
-
-// 方式 1: 直接获取解码结果数组
-let messages: Vec<Ft8DecodedMessage> = decode_audio(&audio_samples, &config, window_start_offset);
+// 模式一：同步等待所有 Pass 跑完，一次性拿结果
+let messages: Vec<Ft8DecodedMessage> = decode_audio(&audio, &config, window_start_offset, sequence_id);
 
 for m in messages {
-    println!(
-        "[{:4.0}Hz] DT:{:+5.2}s SNR:{:+3}dB | 发送方: {:8} ({}) | 接收方: {:8} | 阶段: {:?} | 网格: {}",
-        m.freq, m.dt, m.snr, m.sender_callsign, m.country_cn, m.receiver_callsign, m.qso_stage, m.grid
-    );
+    println!("[seq:{}] [{:4.0}Hz] DT:{:+5.2}s SNR:{:+3}dB ~ {}", m.sequence_id, m.freq, m.dt, m.snr, m.message);
 }
 ```
+
+#### 模式二：实时增量回调流出解码 (异步流式优先模式)
+- **函数**：`rust_ft8::decode_audio_with_callback(audio, config, window_start_offset, sequence_id, callback)`
+- **特点**：在多轮消减进行中，**一旦解调出新信号（例如 Pass 1 刚结束），立即触发 `callback`**！调用者能够第一时间（通常 0.2~0.3 秒内）获取空中最强的信号（如 CQ、自己的应答），无需死等后续耗时的弱信号干扰消除和 Pass 2/Pass 3。
+- **适用场景**：电台上位机瀑布图/通联界面、需要将最早解出数据快速推入队列或通道（Channel）的实时系统。
+
+```rust
+use rust_ft8::{decode_audio_with_callback, DecoderConfig};
+use std::sync::mpsc::channel;
+
+let config = DecoderConfig::default();
+let window_start_offset = -0.9f32;
+let sequence_id = 1002u64;
+
+let (tx, rx) = channel();
+
+// 模式二：增量回调，率先解出的信号率先流出
+let all_results = decode_audio_with_callback(&audio, &config, window_start_offset, sequence_id, move |msg| {
+    println!(">>> [实时解出率先到达] seq:{} 信号: {}", msg.sequence_id, msg.message);
+    tx.send(msg.clone()).ok();
+});
+
+println!("全部 Passes 扫尾完成，共交付 {} 条信号", all_results.len());
+```
+
+---
+
+### 2.3 流式音频边收边解与序列号关联
+
+在连续数据流（例如声卡每 160ms 喂入音频切片）中，用户可直接将 `sequence_id: u64` 传入流式接收机：
+
+```rust
+use rust_ft8::{DecoderConfig, StreamingFt8Receiver, StreamDecodedEvent};
+
+let config = DecoderConfig::default();
+let slot_seq = 20261003001u64; // 本时隙对应的序列号
+
+// 创建绑定时隙序列号的流式接收机
+let mut receiver = StreamingFt8Receiver::with_window_offset_and_seq(config, -0.9, slot_seq);
+
+// 方式 A：逐包喂流并使用回调监听
+let chunk = [0.0f32; 1920]; // 160ms 单声道音频帧
+receiver.feed_chunk_with_callback_with_seq(&chunk, slot_seq, |event| {
+    match event {
+        StreamDecodedEvent::EarlyDecoded { signals, time_sec, sequence_id } => {
+            println!("[t={:.2}s, seq={}] 提前输出 {} 条强信号", time_sec, sequence_id, signals.len());
+        }
+        StreamDecodedEvent::CycleCompleted { all_signals, sequence_id, .. } => {
+            println!("[seq={}] 全时隙扫尾完成，共 {} 条信号", sequence_id, all_signals.len());
+        }
+        StreamDecodedEvent::DecodeFinished { total_signals, sequence_id, .. } => {
+            println!("[seq={}] 本轮时隙完全解调结束，共 {} 条信号", sequence_id, total_signals);
+        }
+        _ => {}
+    }
+});
+```
+
+---
+
+### 2.4 FT8 误解结果 (False Decodes / Ghost Decodes) 成因与 WSJT-X 校验机制深度剖析
+
+#### 1. 为什么 FT8 会产生“乱码消息”与幽灵解码？
+- **物理与编码事实**：
+  FT8 采用 LDPC(174, 91) 码，其中信息位为 77 位（Payload），校验位为 **14 位 CRC（CRC-14）**。
+  14 位 CRC 的理论随机碰撞概率为 $2^{-14} = 1/16384 \approx 6.1 \times 10^{-5}$。
+- **OSD 搜索对虚警率的放大效应**：
+  当信道存在严重多径或噪声极大时，解调器会启动 OSD（Ordered Statistics Decoding，有序统计译码）。OSD 会尝试翻转不可靠的低似然比特，生成数千到数万个候选测试码字。在大量的纯白噪声随机比特组合中，**碰巧算出 14 位 CRC 校验通过的概率急剧上升**！这就是业余无线电界俗称的“Ghost Decodes”（幽灵解码）。
+
+#### 2. WSJT-X 官方源码是如何层层剔除误解的？
+查阅 WSJT-X 源码（`ft8_decode.f90`, `chkmsg.f90`, `packjt.f90`, `valid_call.f90`），官方部署了**五道纵深防御防线**：
+
+1. **第一道防线：BP 自然收敛 vs OSD 降级熔断（WSJT-X 核心防线）**
+   - **BP 算法收敛**：若 LDPC 的 83 个校验方程全部为 0 且 CRC 正确，赋予最高置信度。
+   - **OSD 盲搜索熔断（核心机制）**：若由 OSD 降级译出，**绝对严禁放行 Free Text（Type 0.0，71 位任意自由文本）与 Telemetry（Type 0.5，纯十六进制遥测）**！因为自由文本没有任何内部语法约束，白噪声一旦偶然通过 CRC14 就会变成纯乱码；而标准通联报文有严苛的呼号 Base37 语法二次约束。
+2. **第二道防线：严苛的 ITU 呼号语法验证 (`valid_call.f90`)**
+   - 28 位 Base37 呼号有效取值上限为 $262,417,410$（对应 `ZZ9ZZZ`），超过此值判定为非法；
+   - 呼号第 2 位或第 3 位必须是数字（0-9，代表业余无线电分区）；
+   - **分区数字之后必须全为英文字母（A-Z），严禁出现数字，严禁以数字结尾**（例如 `BG5123` 立即拦截剔除，必须形如 `BG5VDH`）；
+   - 前缀字符必须符合 ITU 国家分配字头。
+3. **第三道防线：Maidenhead 网格与物理报告合法性检查 (`chkmsg.f90`)**
+   - 网格前两位字母必须严格在 `A..=R` 之间（全球 18 个大区），超出即丢弃；
+   - SNR 信号报告严格限制在物理可信区间 `[-30, +30]` dB 之间，荒谬数值直接剔除。
+4. **第四道防线：空时频邻域非极大值抑制 (NMS)**
+   - 同一时隙内 $|\Delta f| < 8\text{ Hz}$ 且 $|\Delta t| < 0.2\text{s}$ 的候选点被视为同一信号的频域旁瓣或多径冲突，只保留信噪比最高或硬错误最少的候选。
+5. **第五道防线：A Priori (AP) 先验哈希比对**
+   - 对极弱信号（SNR < -20 dB），利用历史活跃呼号表进行哈希辅助验证。
+
+#### 3. 本库的严格落实与保障
+`rust-ft8` 现已全面对齐上述 WSJT-X 官方防线：
+- 在 `src/demodulate/extract.rs` 中**彻底拦截 OSD 自由文本与遥测乱码**，未通过自然 BP 收敛的特种格式直接丢弃；
+- 在 `src/pack/callsign.rs` 中全面落实 `valid_call` 规范，阻断非法数字后缀与超限呼号；
+- 在 `src/pack/grid.rs` 中实施 `A..=R` 与 `[-30, +30] dB` 强制截断；
+- 在 `src/demodulate/pipeline.rs` 中落实时频近邻 NMS 抑制，杜绝频谱重叠产生的伪假阳性。
+
 
 #### 2.2.1 解码配置结构体详解 (`DecoderConfig`)
 

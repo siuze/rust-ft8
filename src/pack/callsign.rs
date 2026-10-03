@@ -245,9 +245,25 @@ pub fn unpack28(n28: u32, ip: u8, i3: u8) -> Result<String, String> {
     n /= 36;
     c6[0] = CHARS_37[(n % 37) as usize];
 
-    // 严谨的 ITU 呼号分区数字检查：标准呼号必在第 2 位或第 3 位包含数字 (0..9)
-    if !c6[2].is_ascii_digit() && !(c6[1].is_ascii_digit() && c6[0] == b' ') {
-        return Err(format!("非法的呼号结构 (缺少分区数字): {:?}", c6));
+    // 严谨的 ITU 呼号规范检查：
+    // 1. 分区数字：标准呼号必在第 2 位或第 3 位包含数字 (0..9)
+    let digit_pos = if c6[2].is_ascii_digit() {
+        2
+    } else if c6[1].is_ascii_digit() && c6[0] == b' ' {
+        1
+    } else {
+        return Err(format!("非法的呼号结构 (缺少有效分区数字): {:?}", c6));
+    };
+
+    // 2. 呼号后缀：分区数字之后必须全为英文字母 (至少 1 位字母，禁止包含数字)
+    let suffix = &c6[digit_pos + 1..];
+    if suffix.is_empty() || !suffix[0].is_ascii_alphabetic() {
+        return Err(format!("呼号缺少合法的字母后缀: {:?}", c6));
+    }
+    for &ch in suffix {
+        if ch != b' ' && !ch.is_ascii_alphabetic() {
+            return Err(format!("呼号后缀包含非法非字母字符: {:?}", c6));
+        }
     }
 
     let mut result = String::new();

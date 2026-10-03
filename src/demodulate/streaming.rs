@@ -50,17 +50,20 @@ pub enum StreamDecodedEvent {
     EarlyDecoded {
         signals: Vec<Ft8DecodedMessage>,
         time_sec: f32,
+        sequence_id: u64,
     },
     /// 阶段 3 (t ≈ 12.5s ~ 12.8s)：发射全部结束，微弱信号消减扫尾完成，全量最终结果交付
     CycleCompleted {
         all_signals: Vec<Ft8DecodedMessage>,
         time_sec: f32,
+        sequence_id: u64,
     },
     /// 阶段 4：本轮时隙解码完全结束通知 (所有 Pass 与消减计算均已完成，可安全转入下一时隙)
     DecodeFinished {
         total_signals: usize,
         audio_duration_sec: f32,
         is_last_chunk: bool,
+        sequence_id: u64,
     },
 }
 
@@ -77,15 +80,16 @@ pub struct StreamingFt8Receiver {
     last_completed_count: usize,
     early_results: Vec<DecodedSignal>,
     window_start_offset: f32,
+    pub sequence_id: u64,
 }
 
 impl StreamingFt8Receiver {
-    /// 创建流式接收机实例 (默认 window_start_offset = 0.0)
+    /// 创建流式接收机实例 (默认 window_start_offset = 0.0, sequence_id = 0)
     pub fn new(config: DecoderConfig) -> Self {
-        Self::with_window_offset(config, 0.0)
+        Self::with_window_offset_and_seq(config, 0.0, 0)
     }
 
-    /// 创建带时间窗口起始点偏移的流式接收机实例
+    /// 创建带时间窗口起始点偏移的流式接收机实例 (默认 sequence_id = 0)
     ///
     /// # 参数
     /// - `config`: 解调参数
@@ -93,6 +97,16 @@ impl StreamingFt8Receiver {
     ///   - 例如：调用者以当前时间窗口 -0.9s 作为录音开始，则传入 `-0.9`；
     ///   - 各个解码信号的 DT 将自动以此校正为相对真实时间窗口的时间延迟。
     pub fn with_window_offset(config: DecoderConfig, window_start_offset: f32) -> Self {
+        Self::with_window_offset_and_seq(config, window_start_offset, 0)
+    }
+
+    /// 创建带时间窗口起始点偏移和请求序列号的流式接收机实例
+    ///
+    /// # 参数
+    /// - `config`: 解调参数
+    /// - `window_start_offset`: 录音起始点时间偏移 (秒)
+    /// - `sequence_id`: 请求序列号 (uint64)，透传至解码产物
+    pub fn with_window_offset_and_seq(config: DecoderConfig, window_start_offset: f32, sequence_id: u64) -> Self {
         Self {
             pipeline: Ft8Pipeline::new(),
             config,
@@ -105,7 +119,18 @@ impl StreamingFt8Receiver {
             last_completed_count: 0,
             early_results: Vec::new(),
             window_start_offset,
+            sequence_id,
         }
+    }
+
+    /// 设置当前时隙周期的请求序列号
+    pub fn set_sequence_id(&mut self, sequence_id: u64) {
+        self.sequence_id = sequence_id;
+    }
+
+    /// 获取当前时隙周期的请求序列号
+    pub fn sequence_id(&self) -> u64 {
+        self.sequence_id
     }
 
     /// 查询当前时隙周期是否已经完成了最终解码
@@ -215,11 +240,43 @@ impl StreamingFt8Receiver {
         self.feed_chunk_ext(chunk, true)
     }
 
+    /// 带有 sequence_id 和 is_last 标志的原始流式喂流接口
+    pub fn feed_chunk_ext_with_seq(&mut self, chunk: &[f32], sequence_id: u64, is_last: bool) -> Vec<StreamEvent> {
+        self.sequence_id = sequence_id;
+        self.feed_chunk_ext(chunk, is_last)
+    }
+
+    /// 带有 sequence_id 标志的原始流式喂流接口 (默认 is_last=false)
+    pub fn feed_chunk_with_seq(&mut self, chunk: &[f32], sequence_id: u64) -> Vec<StreamEvent> {
+        self.feed_chunk_ext_with_seq(chunk, sequence_id, false)
+    }
+
+    /// 带有 sequence_id 与 is_last 标志的结构化流式喂流接口
+    pub fn feed_chunk_structured_ext_with_seq(
+        &mut self,
+        chunk: &[f32],
+        sequence_id: u64,
+        is_last: bool,
+    ) -> Vec<StreamDecodedEvent> {
+        self.sequence_id = sequence_id;
+        self.feed_chunk_structured_ext(chunk, is_last)
+    }
+
+    /// 带有 sequence_id 标志的结构化流式喂流接口 (默认 is_last=false)
+    pub fn feed_chunk_structured_with_seq(
+        &mut self,
+        chunk: &[f32],
+        sequence_id: u64,
+    ) -> Vec<StreamDecodedEvent> {
+        self.feed_chunk_structured_ext_with_seq(chunk, sequence_id, false)
+    }
+
     /// 带有 is_last 标志的结构化流式喂流接口
     pub fn feed_chunk_structured_ext(&mut self, chunk: &[f32], is_last: bool) -> Vec<StreamDecodedEvent> {
         let raw_events = self.feed_chunk_ext(chunk, is_last);
         let current_time_sec = (self.samples_in_cycle as f32) / 12000.0;
         let offset = self.window_start_offset;
+        let seq = self.sequence_id;
 
         raw_events
             .into_iter()
@@ -233,21 +290,23 @@ impl StreamingFt8Receiver {
                 StreamEvent::EarlyDecoded(signals) => {
                     let structured: Vec<Ft8DecodedMessage> = signals
                         .into_iter()
-                        .map(|s| Ft8DecodedMessage::parse_with_drift(s.dt, s.snr, s.freq, s.drift, &s.message, offset))
+                        .map(|s| Ft8DecodedMessage::parse_with_sequence(s.dt, s.snr, s.freq, s.drift, &s.message, offset, seq))
                         .collect();
                     StreamDecodedEvent::EarlyDecoded {
                         signals: structured,
                         time_sec: current_time_sec,
+                        sequence_id: seq,
                     }
                 }
                 StreamEvent::CycleCompleted(signals) => {
                     let structured: Vec<Ft8DecodedMessage> = signals
                         .into_iter()
-                        .map(|s| Ft8DecodedMessage::parse_with_drift(s.dt, s.snr, s.freq, s.drift, &s.message, offset))
+                        .map(|s| Ft8DecodedMessage::parse_with_sequence(s.dt, s.snr, s.freq, s.drift, &s.message, offset, seq))
                         .collect();
                     StreamDecodedEvent::CycleCompleted {
                         all_signals: structured,
                         time_sec: current_time_sec,
+                        sequence_id: seq,
                     }
                 }
                 StreamEvent::DecodeFinished {
@@ -258,6 +317,7 @@ impl StreamingFt8Receiver {
                     total_signals,
                     audio_duration_sec,
                     is_last_chunk,
+                    sequence_id: seq,
                 },
             })
             .collect()
@@ -277,6 +337,34 @@ impl StreamingFt8Receiver {
         for ev in events {
             callback(ev);
         }
+    }
+
+    /// 支持带 sequence_id 与 is_last 标志的回调式流式喂流接口
+    pub fn feed_chunk_with_callback_ext_with_seq<F>(
+        &mut self,
+        chunk: &[f32],
+        sequence_id: u64,
+        is_last: bool,
+        mut callback: F,
+    ) where
+        F: FnMut(StreamDecodedEvent),
+    {
+        let events = self.feed_chunk_structured_ext_with_seq(chunk, sequence_id, is_last);
+        for ev in events {
+            callback(ev);
+        }
+    }
+
+    /// 支持带 sequence_id 标志的用户自定义回调句柄流式喂流接口
+    pub fn feed_chunk_with_callback_with_seq<F>(
+        &mut self,
+        chunk: &[f32],
+        sequence_id: u64,
+        callback: F,
+    ) where
+        F: FnMut(StreamDecodedEvent),
+    {
+        self.feed_chunk_with_callback_ext_with_seq(chunk, sequence_id, false, callback);
     }
 
     /// 支持用户自定义回调句柄 (Callback) 的流式喂流接口 (默认 is_last=false)

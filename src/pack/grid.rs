@@ -81,10 +81,14 @@ pub fn unpack_grid_report(igrid4: u16, ir: u8) -> String {
             4 => "73".to_string(),
             _ => {
                 let val = (irpt as i32) - 35;
-                if ir > 0 {
-                    format!("R{:+03}", val)
+                if val >= -30 && val <= 30 {
+                    if ir > 0 {
+                        format!("R{:+03}", val)
+                    } else {
+                        format!("{:+03}", val)
+                    }
                 } else {
-                    format!("{:+03}", val)
+                    String::new()
                 }
             }
         }

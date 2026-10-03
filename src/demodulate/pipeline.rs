@@ -71,6 +71,21 @@ impl Ft8Pipeline {
 
     /// 对 15 秒（12000 Hz，约 180,000 采样点）音频数据执行 3-Pass 消减解调
     pub fn decode(&self, audio: &[f32], config: &DecoderConfig) -> Vec<DecodedSignal> {
+        self.run_pipeline(audio, config, 0.0, 0, None::<fn(&crate::demodulate::message::Ft8DecodedMessage)>).0
+    }
+
+    /// 核心消减解码主循环，支持每轮 Pass 即时向外部回调流出最早解出信号
+    fn run_pipeline<F>(
+        &self,
+        audio: &[f32],
+        config: &DecoderConfig,
+        window_start_offset: f32,
+        sequence_id: u64,
+        mut callback: Option<F>,
+    ) -> (Vec<DecodedSignal>, Vec<crate::demodulate::message::Ft8DecodedMessage>)
+    where
+        F: FnMut(&crate::demodulate::message::Ft8DecodedMessage),
+    {
         let mut working_audio = vec![0.0f32; NMAX];
         let copy_len = audio.len().min(NMAX);
 
@@ -118,7 +133,7 @@ impl Ft8Pipeline {
             let long_fft = self.downsampler.compute_long_fft(&working_audio);
             let d_fft = t_fft.elapsed().as_secs_f32();
 
-            // 3. 候选信号并行提取与译码 (Rayon 多核并行，压满 A55 核心)
+            // 3. 候选信号并行提取与译码 (Rayon 多核并行，压满 CPU 核心)
             let t_dec = std::time::Instant::now();
             let decoded_candidates: Vec<(DecodedSignal, isize)> = candidates
                 .par_iter()
@@ -152,14 +167,33 @@ impl Ft8Pipeline {
                 let conflict_idx = decoded_all.iter().position(|d| {
                     (d.freq - sig.freq).abs() < 8.0 && (d.dt - sig.dt).abs() < 0.20
                 });
+                let mut is_new = false;
                 if let Some(c_idx) = conflict_idx {
                     if sig.hard_errors < decoded_all[c_idx].hard_errors || sig.snr > decoded_all[c_idx].snr {
                         decoded_all[c_idx] = sig.clone();
-                        new_signals.push((sig, ibest));
+                        new_signals.push((sig.clone(), ibest));
+                        is_new = true;
                     }
                 } else {
                     decoded_all.push(sig.clone());
-                    new_signals.push((sig, ibest));
+                    new_signals.push((sig.clone(), ibest));
+                    is_new = true;
+                }
+
+                // 若有新解出的有效信号，且注册了即时回调，立即构造成结构化消息通知外部 (无需等待后续 Pass 和消减计算)！
+                if is_new {
+                    if let Some(ref mut cb) = callback {
+                        let struct_msg = crate::demodulate::message::Ft8DecodedMessage::parse_with_sequence(
+                            sig.dt,
+                            sig.snr,
+                            sig.freq,
+                            sig.drift,
+                            &sig.message,
+                            window_start_offset,
+                            sequence_id,
+                        );
+                        cb(&struct_msg);
+                    }
                 }
             }
             let pass_new_decodes = new_signals.len();
@@ -211,48 +245,67 @@ impl Ft8Pipeline {
 
         // 按载波频率升序排列
         decoded_all.sort_by(|a, b| a.freq.partial_cmp(&b.freq).unwrap());
-        decoded_all
-    }
-
-    /// 完整结构化解码函数，支持传入窗口起始点时间偏移 (window_start_offset)
-    ///
-    /// 自动对 DT 进行时间窗口基准校正，并解析出发送方、接收方、国家地区、通联阶段、网格等结构化字段
-    pub fn decode_structured(
-        &self,
-        audio: &[f32],
-        config: &DecoderConfig,
-        window_start_offset: f32,
-    ) -> Vec<crate::demodulate::message::Ft8DecodedMessage> {
-        let raw_signals = self.decode(audio, config);
-        raw_signals
-            .into_iter()
+        let structured_all = decoded_all
+            .iter()
             .map(|sig| {
-                crate::demodulate::message::Ft8DecodedMessage::parse_with_drift(
+                crate::demodulate::message::Ft8DecodedMessage::parse_with_sequence(
                     sig.dt,
                     sig.snr,
                     sig.freq,
                     sig.drift,
                     &sig.message,
                     window_start_offset,
+                    sequence_id,
                 )
             })
-            .collect()
+            .collect();
+
+        (decoded_all, structured_all)
     }
 
-    /// 支持用户自定义回调句柄的解码函数
+    /// 模式一：完全阻塞式同步解码，一次性返回所有结果
+    ///
+    /// # 参数
+    /// - `audio`: 12000 Hz 单声道浮点音频切片 (约 15 秒)
+    /// - `config`: 解调参数配置
+    /// - `window_start_offset`: 录音起始点相对于真实 15 秒时隙起点的偏移 (秒)
+    /// - `sequence_id`: uint64 请求序列号，将被透传至每个解码消息中
+    pub fn decode_structured(
+        &self,
+        audio: &[f32],
+        config: &DecoderConfig,
+        window_start_offset: f32,
+        sequence_id: u64,
+    ) -> Vec<crate::demodulate::message::Ft8DecodedMessage> {
+        self.run_pipeline(audio, config, window_start_offset, sequence_id, None::<fn(&crate::demodulate::message::Ft8DecodedMessage)>).1
+    }
+
+    /// 模式二：实时增量回调解码 (异步流式优先模式)
+    ///
+    /// 无论多轮消减进行到何种阶段，一旦解调出新信号，**立即**通过 `callback` 句柄流出最早解码数据；
+    /// 调用者无需等待全部 Pass 计算与波形消减结束即可优先处理空中最早到来的有效报文。
+    ///
+    /// # 参数
+    /// - `audio`: 12000 Hz 单声道浮点音频切片
+    /// - `config`: 解调参数配置
+    /// - `window_start_offset`: 录音起始点时间偏移 (秒)
+    /// - `sequence_id`: uint64 请求序列号
+    /// - `callback`: 回调闭包/函数句柄，接收到刚解出的消息引用
+    ///
+    /// # 返回值
+    /// 返回全部 Passes 完成后的全量结构化消息列表 (按频率升序排列)
     pub fn decode_with_callback<F>(
         &self,
         audio: &[f32],
         config: &DecoderConfig,
         window_start_offset: f32,
-        mut callback: F,
-    ) where
-        F: FnMut(crate::demodulate::message::Ft8DecodedMessage),
+        sequence_id: u64,
+        callback: F,
+    ) -> Vec<crate::demodulate::message::Ft8DecodedMessage>
+    where
+        F: FnMut(&crate::demodulate::message::Ft8DecodedMessage),
     {
-        let messages = self.decode_structured(audio, config, window_start_offset);
-        for msg in messages {
-            callback(msg);
-        }
+        self.run_pipeline(audio, config, window_start_offset, sequence_id, Some(callback)).1
     }
 }
 

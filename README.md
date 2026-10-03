@@ -145,7 +145,7 @@ pub struct DecoderConfig {
 - **独立线程池调用**：
   ```rust
   let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-  let signals = pool.install(|| decode_audio(&samples, &config, -0.9));
+  let signals = pool.install(|| decode_audio(&samples, &config, -0.9, 1001));
   ```
 
 ---
@@ -160,23 +160,31 @@ pub struct DecoderConfig {
 rust-ft8 = "0.1.0"
 ```
 
-### 1. 音频文件离线解码
+### 1. 音频文件离线解码 (支持同步阻塞模式与增量实时流出模式)
 
 ```rust
-use rust_ft8::{decode_audio, DecoderConfig, read_wav_file};
+use rust_ft8::{decode_audio, decode_audio_with_callback, DecoderConfig, read_wav_file};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (audio, _sr) = read_wav_file("tests/wav/websdr_test1.wav")?;
     let config = DecoderConfig::default();
+    let offset = -0.9f32; // 提前 0.9s 开始录音的时间窗口校正
+    let sequence_id = 888888u64; // 调用者传入的请求序列号，透传至每个解码消息对象
 
-    // 传入 window_start_offset = -0.9 (针对提前 0.9s 开始录音的 DT 校正)
-    let messages = decode_audio(&audio, &config, -0.9);
-    for m in messages {
+    // 模式一：完全阻塞同步解码 (一次性返回全量排好序的结果)
+    let messages = decode_audio(&audio, &config, offset, sequence_id);
+    for m in &messages {
         println!(
-            "{:4.0} Hz | SNR:{:+3} dB | DT:{:+5.2}s | {} ({}) -> {} | 网格: {}",
-            m.freq, m.snr, m.dt, m.sender_callsign, m.country_cn, m.receiver_callsign, m.grid
+            "[seq:{}] {:4.0} Hz | SNR:{:+3} dB | DT:{:+5.2}s | {} ({}) -> {} | 网格: {}",
+            m.sequence_id, m.freq, m.snr, m.dt, m.sender_callsign, m.country_cn, m.receiver_callsign, m.grid
         );
     }
+
+    // 模式二：实时增量回调流出解码 (每当 Pass 解调出新信号立即触发回调，优先获取最早信号)
+    decode_audio_with_callback(&audio, &config, offset, sequence_id, |m| {
+        println!(">>> [优先流出] seq:{} 收到信号: {}", m.sequence_id, m.message);
+    });
+
     Ok(())
 }
 ```

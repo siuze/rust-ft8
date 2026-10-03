@@ -71,10 +71,12 @@ pub struct Ft8DecodedMessage {
     pub grid: String,
     /// 10. 信号频漂 (单位: Hz，在 12.64s 发射期内的频率漂移量)
     pub drift: f32,
+    /// 11. 请求调用序列号 (调用者传入的 uint64 标识，用于多路、多帧或异步流水线关联上下文)
+    pub sequence_id: u64,
 }
 
 impl Ft8DecodedMessage {
-    /// 从原始解调信号构造结构化消息，并结合 `window_start_offset` 进行 DT 时间基准校正
+    /// 从原始解调信号构造结构化消息，并结合 `window_start_offset` 进行 DT 时间基准校正 (默认 sequence_id = 0)
     pub fn parse(
         raw_dt: f32,
         snr: i32,
@@ -82,10 +84,10 @@ impl Ft8DecodedMessage {
         message_text: &str,
         window_start_offset: f32,
     ) -> Self {
-        Self::parse_with_drift(raw_dt, snr, freq, 0.0, message_text, window_start_offset)
+        Self::parse_with_sequence(raw_dt, snr, freq, 0.0, message_text, window_start_offset, 0)
     }
 
-    /// 包含频漂 (drift) 的结构化消息解析函数
+    /// 包含频漂 (drift) 的结构化消息解析函数 (默认 sequence_id = 0)
     pub fn parse_with_drift(
         raw_dt: f32,
         snr: i32,
@@ -93,6 +95,19 @@ impl Ft8DecodedMessage {
         drift: f32,
         message_text: &str,
         window_start_offset: f32,
+    ) -> Self {
+        Self::parse_with_sequence(raw_dt, snr, freq, drift, message_text, window_start_offset, 0)
+    }
+
+    /// 包含频漂与调用序列号 (sequence_id) 的全参结构化解析函数
+    pub fn parse_with_sequence(
+        raw_dt: f32,
+        snr: i32,
+        freq: f32,
+        drift: f32,
+        message_text: &str,
+        window_start_offset: f32,
+        sequence_id: u64,
     ) -> Self {
         let corrected_dt = raw_dt + window_start_offset;
         let text = message_text.trim();
@@ -118,6 +133,7 @@ impl Ft8DecodedMessage {
                 qso_stage,
                 grid,
                 drift,
+                sequence_id,
             };
         }
 
@@ -201,6 +217,7 @@ impl Ft8DecodedMessage {
             qso_stage,
             grid,
             drift,
+            sequence_id,
         }
     }
 

@@ -257,6 +257,13 @@ impl SymbolExtractor {
                 return None;
             }
 
+            // 核心误码防御规则 (严格对标 WSJT-X 官方安全规范):
+            // 若为 OSD 译码 (非 BP 收敛)，严禁放行缺少 ITU 呼号结构约束的特种格式 (Type 0 / 3 / 5)
+            // 防止 14-bit CRC 碰撞产生纯十六进制或伪 FreeText 乱码！
+            if dec_res.decode_type == DecodeType::Osd && (i3 == 0 || i3 == 3 || i3 == 5) {
+                return None;
+            }
+
             if let Ok(ft8_msg) = unpack77(&payload10) {
                 // 重新构造 79 音调
                 let tones = crate::modulate::ft8_payload_to_tones(&payload10);
