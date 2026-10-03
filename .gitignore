@@ -11,5 +11,7 @@ ft8_decode_aarch64
 *.key
 *.log
 *.wav
+!tests/wav/*.wav
+!tests/wav/*.txt
 .env*
 credentials.toml

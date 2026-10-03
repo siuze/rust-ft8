@@ -12,6 +12,8 @@ categories = ["multimedia::audio", "algorithms", "science"]
 exclude = [
     "reference/**",
     "jtdx/**",
+    "tests/wav/**",
+    "docs/*.pdf",
     "*.wav",
     "*.tar.gz",
     "build_rk.sh",

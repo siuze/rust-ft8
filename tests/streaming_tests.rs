@@ -3,7 +3,11 @@ use std::time::Instant;
 
 #[test]
 fn test_streaming_early_decoding_websdr_test1() {
-    let wav_path = "reference/ft8_lib/test/wav/websdr_test1.wav";
+    let wav_path = if std::path::Path::new("tests/wav/websdr_test1.wav").exists() {
+        "tests/wav/websdr_test1.wav"
+    } else {
+        "reference/ft8_lib/test/wav/websdr_test1.wav"
+    };
     let (audio, sample_rate) = read_wav_file(wav_path).expect("读取 WAV 音频失败");
     assert_eq!(sample_rate, 12000);
 

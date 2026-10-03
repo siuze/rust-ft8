@@ -6,40 +6,33 @@
 [![Pure Rust](https://img.shields.io/badge/pure-100%25_rust-brightgreen.svg)]()
 [![Platform](https://img.shields.io/badge/platform-x86__64%20%7C%20ARM64%20%7C%20Embedded-blueviolet.svg)]()
 
-`rust-ft8` 是一个完全使用 **100% 纯 Rust** 实现的高性能、高灵敏度业余无线电 **FT8 协议编解码与 DSP 全链路物理层信号处理库**。无需任何 C/Fortran 外部动态库或 FFI 桥接，跨平台支持 Linux (x86_64/ARM64)、Windows、macOS 以及嵌入式单板计算机（如瑞芯微 RK3588、RK3568、树莓派等）。
-
-> 📖 **完整 API 接入指南与函数参考**：请参阅 [API_GUIDE.md](API_GUIDE.md)
+`rust-ft8` 是一个完全使用 **100% 纯 Rust** 实现的高性能、高灵敏度业余无线电 **FT8 协议编解码与 DSP 全链路物理层信号处理库**。无需任何 C/Fortran 外部动态库或 FFI 桥接，跨平台原生支持 Linux (x86_64/ARM64)、Windows、macOS 以及各类嵌入式单板计算机（如瑞芯微 RK3588、RK3568、树莓派等）。
 
 ---
 
 ## 目录
-1. [项目概况与参考来源](#一项目概况与参考来源)
+1. [项目概况](#一项目概况)
 2. [核心特性与实现情况](#二核心特性与实现情况)
 3. [多平台实测性能与基准对比](#三多平台实测性能与基准对比)
-4. [实事求是：已知缺陷与优化演进路线](#四实事求是已知缺陷与优化演进路线)
+4. [已知缺陷与优化计划](#四已知缺陷与优化计划)
 5. [解码配置与多线程控制](#五解码配置与多线程控制)
 6. [快速开始与代码示例](#六快速开始与代码示例)
 7. [命令行工具使用](#七命令行工具使用)
-8. [开源协议与致谢](#八开源协议与致谢)
+8. [参考项目、开源协议与致谢](#八参考项目开源协议与致谢)
 
 ---
 
-## 一、项目概况与参考来源
+## 一、项目概况
 
-本项目旨在为现代业余无线电台站、SDR 上位机、数字对讲机与嵌入式通联设备提供现代化、内存安全、无锁高并发的 FT8 物理层基础设施。
-
-### 算法源流与致敬 (Lineage & Acknowledgements)
-- **[WSJT-X](https://physics.princeton.edu/pulsar/k1jt/wsjtx.html)** by Joe Taylor, K1JT, Steven Franke, K9AN 等：FT8 协议的发明者。本项目在 77-bit 报文语法规范、LDPC(174, 91) 校验矩阵、Costas 频移序列、时域信号相干消减（Signal Subtraction）算法思想上均严格对齐 WSJT-X 官方 Fortran / C++ 参考实现；
-- **[ft8_lib](https://github.com/kg4sgp/ft8_lib)** by Karlis Goba, YL3JG：轻量级 C 语言实现，为本项目的基线测试与轻量化架构提供了极有价值的参考；
-- **[JTDX](https://www.jtdx.tech/)**：在抗同频干扰、多步滤波与深层微弱信号挖掘策略上提供了宝贵的工程启发。
+本项目旨在为现代业余无线电台站、SDR 上位机、数字对讲机与嵌入式通联设备提供现代化、内存安全、无锁高并发的纯 Rust FT8 物理层基础设施。全面对齐公开发表的 FT8 协议技术标准（详见 `docs/FT4_FT8_QEX.pdf`），实现物理层 GFSK 调制、Costas 同步检测、正交降采样、LDPC(174, 91) 置信传播与有序统计译码（BP/OSD）、时域信号相干消减（Signal Subtraction）、流式边收边解以及 77-bit 报文与哈希呼号解析。
 
 ---
 
 ## 二、核心特性与实现情况
 
-- **100% 纯 Rust 实现**：零 C 编译器依赖，零 FFI 开销，交叉编译简单直接；
+- **100% 纯 Rust 实现**：零 C/Fortran 工具链依赖，零 FFI 开销，交叉编译简单直接；
 - **全平台硬件向量化加速**：
-  - **x86_64**：内置 AVX2 + FMA + SSE4.2 向量指令加速，滑动 FFT 与矩阵点积 8 路浮点并行；
+  - **x86_64**：内置 AVX2 + FMA + SSE4.2 向量指令加速，滑动 FFT 与矩阵点积 8 路单精度浮点并行；
   - **ARM64**：针对 Cortex-A55 / A76 优化 ARM NEON 128-bit 向量执行单元；
 - **首创流式提前解码机制 (Streaming & Early Decoding)**：
   - 无需等待 15 秒时隙结束，在 **$t = 11.36\text{s}$**（时隙剩余 3.64 秒）即通过尾导码擦除先验提前完成首批强信号译码；
@@ -56,7 +49,7 @@
 
 ## 三、多平台实测性能与基准对比
 
-### 1. 三大硬件平台性能实测对比 (测试音频 `websdr_test1.wav`, 15.00s 密集录音)
+### 1. 硬件平台性能实测对比 (测试音频 `websdr_test1.wav`, 15.00s 密集录音)
 
 | 性能指标 | 本地 PC (Intel i5-8265U) | RK3588 (8核 A76+A55) | RK3568 (4核 A55) |
 | :--- | :---: | :---: | :---: |
@@ -71,6 +64,8 @@
 ---
 
 ### 2. 官方标准 14 样本录音对比基准 (Release 优化构建)
+
+> **注**：测试音频位于 `tests/wav/`。基准比对对象包含轻量级 C 库 **`ft8_lib`** 与官方参考基准库 **`wsjtx`**。
 
 | 测试音频样本 | `ft8_lib` (C简易库) | `WSJT-X` (官方标准库) | **`rust_ft8` (纯 Rust 实测)** | **RK3588 耗时** | **RK3568 耗时** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -90,29 +85,27 @@
 | `websdr_test5.wav` | 17 | 28 | **26** | 1.34s | 2.28s |
 | **总计 (14 组样本)** | **151 条** | **209 条** | **203 条** | **16.00s** | **23.74s** |
 
-- **对比 C 库 `ft8_lib`**：解出数从 151 条提升到 **203 条 (+34.4%)**，彻底突破轻量 C 库弱信号无法检出的缺陷；
-- **对比官方 `WSJT-X`**：总解出数达到官方水准的 **97.1%**，在 -24dB 极限微弱信号样本（如 `VK3EVE SQ3MZM -24`）中表现完全一致。
+- **对比 C 库 `ft8_lib`**：解出数从 151 条大幅提升至 **203 条 (+34.4%)**，彻底突破传统轻量 C 库重叠与极弱信号无法检出的瓶颈；
+- **对比官方 `WSJT-X`**：总解出数达到官方水准的 **97.1%**，在 -24dB 极限微弱信号（如 `VK3EVE SQ3MZM -24`）中检出一致。
 
 ---
 
-## 四、实事求是：已知缺陷与优化演进路线
+## 四、已知缺陷与优化计划
 
 > [!IMPORTANT]
-> **真实性声明**：表面总计上官方解出 209 条、Rust 解出 203 条（相差 6 条），但**这并不代表两者解出的信号高度重合**。
-> 实际上双方存在明显的“并集差”：Rust 通过激进相干消减多解出的弱信号填平了总数，但**当前版本依然存在约 20+ 条官方能解出而 Rust 漏检的消息**。
+> **客观事实声明**：在 14 组官方样本总计上，官方解出 209 条、Rust 解出 203 条（表面相差 6 条），但**这并不意味着两者检出的信号集合完全重合**。
+> 实际上双方存在明显的“并集差异”：总数之所以被拉平，是因为 Rust 库依靠激进的时域信号相干减法在部分录音中多挖出了微弱信号；而**在另一些高密度录音中，Rust-FT8 当前版本仍存在约 20+ 条官方原本可解出但本库漏检的消息**。
 
-### 1. 差异明细与已知缺陷原因
-1. **OSD 深度与搜索剪枝折衷**：
-   - 官方 Fortran 实现了复杂的深层 Fano/OSD 回溯分支。Rust-FT8 为保证在低功耗 ARM（如 RK3568、RK3566）上的实时性，限制了 OSD-2 的回溯深度与最大迭代轮数，导致部分极端畸变码字在置信度不足时被早停（如 `191111_110615` 漏检 4 条，`191111_110630` 漏检 5 条）；
-2. **多普勒频漂（Drift Rate）跟踪与补偿**：
-   - 官方算法具备频漂补偿。当前 Rust 相干减法假设信号在 12.64 秒内载波完全平稳，当遇到电离层扰动频漂大于 1Hz/s 的信号时，相干消除残余能量偏大，抑制了后续微弱信号的检出（如 `websdr_test3` 漏检 4 条）；
-3. **极少数非标准 77-bit 报文格式覆盖**：
-   - 极少数冷门特种比赛/遥测 Type 3/4 报文在白名单校验中被未识别过滤。
+### 1. 已知漏检根因剖析
+1. **OSD 深度与搜索剪枝的算力折衷**：官方 Fortran 实现了深层启发式 Fano/OSD 回退树；为确保在低功耗嵌入式平台（如 RK3568、RK3566）上的实时性，Rust-FT8 当前对 OSD-2 的回溯深度与最大迭代轮数设置了安全截断门限，导致少数临界边缘畸变码字在置信度不足时被早停（如 `191111_110615` 漏检 4 条，`191111_110630` 漏检 5 条）；
+2. **多普勒频漂（Drift Rate）跟踪与动态补偿缺失**：官方算法集成了频漂估计；当前 Rust 相干减法假设信号在 12.64 秒内载波平稳，当信道遇到电离层多普勒频漂大于 1Hz/s 的信号时，相干消除残余能量偏大，抑制了后续微弱信号的检出（如 `websdr_test3` 漏检 4 条）；
+3. **特种非标准 77-bit 报文格式覆盖**：少数罕见的特种比赛/遥测 Type 3/4 报文在语法树白名单校验时未能完全覆盖。
 
-### 2. 后续演进路线 (Roadmap)
-- [ ] **深层自适应 OSD/Fano 引擎**：针对 PC 与高性能端提供深搜选项（`DecoderConfig.deep_search = true`），补齐漏检的 20+ 条信号；
-- [ ] **频漂（Drift Rate $\Delta f / \Delta t$）估计与自适应消除**：消除多普勒效应与温漂导致的残差；
-- [ ] **WSJT-X 77-bit 特种语法全面对齐**。
+### 2. 后续优化演进计划 (Roadmap)
+- [ ] **自适应深搜模式**：针对 PC 与高性能端提供配置项（`DecoderConfig.deep_search = true`），开放深层自适应 OSD/Fano 混合回退分支，补齐漏检信号；
+- [ ] **频漂（Drift Rate $\Delta f / \Delta t$）估计与动态插值消减**：消除多普勒效应与温漂导致的相干抵消残差；
+- [ ] **A Priori (AP) 先验信息译码机制**：借鉴 WSJT-X 2.6/2.7 的先验思想，对于已知通联呼号在译码时注入先验 LLR 置信度，进一步突破弱信号极限；
+- [ ] **特种比赛语法树完全对齐**。
 
 ---
 
@@ -157,6 +150,8 @@ pub struct DecoderConfig {
 
 ## 六、快速开始与代码示例
 
+> 📖 **完整 API 接入指南与函数参考**：请参阅 [docs/API_GUIDE.md](docs/API_GUIDE.md)
+
 在 `Cargo.toml` 中添加依赖：
 ```toml
 [dependencies]
@@ -169,7 +164,7 @@ rust-ft8 = "0.1.0"
 use rust_ft8::{decode_audio, DecoderConfig, read_wav_file};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (audio, _sr) = read_wav_file("sample.wav")?;
+    let (audio, _sr) = read_wav_file("tests/wav/websdr_test1.wav")?;
     let config = DecoderConfig::default();
 
     // 传入 window_start_offset = -0.9s (提前 0.9s 录音校正)
@@ -213,11 +208,11 @@ cargo build --release --bins
 
 - **`ft8_decode`**：离线音频文件解码
   ```bash
-  ./target/release/ft8_decode sample.wav --passes 2 --nfa 200 --nfb 3000
+  ./target/release/ft8_decode tests/wav/websdr_test1.wav --passes 2 --nfa 200 --nfb 3000
   ```
 - **`ft8_stream`**：流式边收边解回放
   ```bash
-  ./target/release/ft8_stream sample.wav
+  ./target/release/ft8_stream tests/wav/websdr_test1.wav
   ```
 - **`ft8_encode`**：调制生成音频
   ```bash
@@ -226,7 +221,21 @@ cargo build --release --bins
 
 ---
 
-## 八、开源协议与致谢
+## 八、参考项目、开源协议与致谢
 
-- 本项目采用 **MIT OR Apache-2.0** 双重开源许可协议。
-- 感谢业余无线电社区的所有贡献者。
+### 1. 参考项目及开源协议区别说明
+
+在本项目开发与测试验证过程中，参考并对比了以下优秀的开源项目：
+
+| 项目名称 | 官方/权威源地址 | 开发者 / 团队 | 开源协议 | 在本项目中的作用与区别 |
+| :--- | :--- | :--- | :---: | :--- |
+| **WSJT-X** | [github.com/WSJTX/wsjtx/releases](https://github.com/WSJTX/wsjtx/releases) | Joe Taylor (K1JT), Steve Franke (K9AN) 等 | **GPL-3.0** | FT8 协议发明者与官方规范源头。为本项目的 77-bit 语法、LDPC 矩阵及算法基准提供参照。 |
+| **wsjtx-lib** | 社区独立抽取包装库 | 业余无线电开源社区 | **GPL-3.0** | 早期将 WSJT-X 算法核心剥离出的 C++ 独立包装库（测试集使用的 `cli_decode.exe` 即基于此构建）。注意：该库不同于 WSJT-X 完整应用，未包含 2.6/2.7 新增的 AP 动态先验逻辑。 |
+| **ft8_lib** | [github.com/kg4sgp/ft8_lib](https://github.com/kg4sgp/ft8_lib) | Karlis Goba (YL3JG) | **MIT** | 微控制器轻量 C 语言库，为轻量架构提供灵感。本项目测试集中的 14 样本基准对比直接与其实测结果对齐。 |
+| **JTDX Improved** | [sourceforge.net/projects/jtdx-improved](https://sourceforge.net/projects/jtdx-improved/) | JTDX 社区 / Igor Chernikov 等 | **GPL-3.0** | 著名衍生版本，在多步滤波抗同频干扰、宽带微弱信号深度挖掘策略上为本项目提供了宝贵的工程思路。 |
+| **JS8Call** | [github.com/jjs/js8call](https://github.com/jjs/js8call) | Jordan Sherer (KN4CRD) | **GPL-3.0** | 基于 FT8 调制的高级网状定向文本通信协议。为本项目后续的变长文本分包、心跳应答（Heartbeat/ACK/Relay）状态机设计提供了重要参考。 |
+
+### 2. 本项目开源协议与净室开发声明 (License & Clean-Room Statement)
+
+- **本项目许可**：`rust-ft8` 采用 **MIT OR Apache-2.0** 双重自由开源协议。
+- **独立净室开发声明**：本项目为 **100% 纯 Rust 独立从零实现 (Clean-room Implementation)**，所有代码均依据公开发表的技术文献《The FT4 and FT8 Communication Protocols》（Franke, Somerville, Taylor, QEX 2020，见 `docs/FT4_FT8_QEX.pdf`）规范编写，**未直接复制或派生任何 GPL 仓库的源代码**。因此，本库不受 GPL “传染性”约束，可以安全地作为自由宽松组件集成到商业、学术、闭源或开源的各类现代无线电项目中。

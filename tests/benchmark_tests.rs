@@ -50,10 +50,19 @@ fn normalize_message(msg: &str) -> String {
     norm_parts.join(" ")
 }
 
+fn resolve_test_path(filename: &str) -> String {
+    let p = format!("tests/wav/{}", filename);
+    if std::path::Path::new(&p).exists() {
+        p
+    } else {
+        format!("reference/ft8_lib/test/wav/{}", filename)
+    }
+}
+
 #[test]
 fn test_decode_single_wav_websdr_test1() {
-    let wav_path = "reference/ft8_lib/test/wav/websdr_test1.wav";
-    let (audio, sample_rate) = read_wav_file(wav_path).expect("读取 WAV 失败");
+    let wav_path = resolve_test_path("websdr_test1.wav");
+    let (audio, sample_rate) = read_wav_file(&wav_path).expect("读取 WAV 失败");
     assert_eq!(sample_rate, 12000);
 
     let pipeline = Ft8Pipeline::new();
@@ -128,8 +137,8 @@ fn test_benchmark_all_websdr_wavs() {
     let total_start = Instant::now();
 
     for name in &test_files {
-        let wav_path = format!("reference/ft8_lib/test/wav/{}.wav", name);
-        let txt_path = format!("reference/ft8_lib/test/wav/{}.txt", name);
+        let wav_path = resolve_test_path(&format!("{}.wav", name));
+        let txt_path = resolve_test_path(&format!("{}.txt", name));
 
         let (audio, _sr) = match read_wav_file(&wav_path) {
             Ok(res) => res,
@@ -242,7 +251,7 @@ fn test_benchmark_14_baseline_wavs() {
     let total_start = Instant::now();
 
     for &(name, c_count, wsjtx_count) in &baseline_files {
-        let wav_path = format!("reference/ft8_lib/test/wav/{}.wav", name);
+        let wav_path = resolve_test_path(&format!("{}.wav", name));
         let (audio, _sr) = match read_wav_file(&wav_path) {
             Ok(res) => res,
             Err(e) => {

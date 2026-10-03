@@ -46,7 +46,11 @@ fn test_encoder_tones_and_audio_api() {
 
 #[test]
 fn test_structured_decoder_with_window_offset() {
-    let wav_path = "reference/ft8_lib/test/wav/websdr_test1.wav";
+    let wav_path = if std::path::Path::new("tests/wav/websdr_test1.wav").exists() {
+        "tests/wav/websdr_test1.wav"
+    } else {
+        "reference/ft8_lib/test/wav/websdr_test1.wav"
+    };
     let (audio, sample_rate) = read_wav_file(wav_path).expect("读取测试音频失败");
     assert_eq!(sample_rate, 12000);
 
