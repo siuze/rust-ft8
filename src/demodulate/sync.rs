@@ -239,13 +239,13 @@ impl SyncSearcher {
             }
         }
 
-        // 4. 去重：在 4 Hz 和 0.04 秒范围内的近邻峰仅保留最高者
+        // 4. 去重 (NMS 非极大值抑制)：在 4.5 Hz 和 0.08 秒范围内的近邻峰仅保留最高者
         raw_candidates.sort_by(|a, b| b.sync.partial_cmp(&a.sync).unwrap());
         let mut pruned: Vec<Candidate> = Vec::new();
 
         for cand in raw_candidates {
             let is_dupe = pruned.iter().any(|p| {
-                (p.freq - cand.freq).abs() < 2.0 && (p.dt - cand.dt).abs() < 0.04
+                (p.freq - cand.freq).abs() < 4.5 && (p.dt - cand.dt).abs() < 0.08
             });
             if !is_dupe {
                 pruned.push(cand);

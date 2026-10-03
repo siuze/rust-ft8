@@ -114,14 +114,19 @@ impl Ft8Pipeline {
                 _ => config.sync_min - 0.1, // 第 3 轮深搜残差
             };
 
-            // 1. 在当前残差音频中搜索候选信号
+            // 1. 在当前残差音频中搜索候选信号 (动态分级候选数，消除无效计算)
+            let max_cands = match ipass {
+                1 => if config.deep_search { 200 } else { 120 },
+                2 => if config.deep_search { 120 } else { 80 },
+                _ => if config.deep_search { 80 } else { 50 },
+            };
             let t_find = std::time::Instant::now();
             let candidates = self.searcher.find_candidates(
                 &working_audio,
                 config.nfa,
                 config.nfb,
                 sync_thresh,
-                300,
+                max_cands,
             );
             let d_find = t_find.elapsed().as_secs_f32();
 
@@ -142,15 +147,24 @@ impl Ft8Pipeline {
                     || (vec![Complex32::new(0.0, 0.0); NFFT2], vec![Complex32::new(0.0, 0.0); NFFT2]),
                     |(cd0_buf, cd1_buf), cand| {
                         self.downsampler.downsample_to_slice(&long_fft, cand.freq, cd0_buf);
-                        let (_ibest_init, delf, _, _) = self.searcher.fine_sync_with_drift(cd0_buf, cand.dt, false);
-                        let (cd0, f1) = if delf.abs() < 0.05 {
-                            (&*cd0_buf, cand.freq)
+                        let (ibest_init, delf, _, sync_pow_init) = self.searcher.fine_sync_with_drift(cd0_buf, cand.dt, false);
+                        // 快速前置剪枝：若初次同步度量极差，直接早停剔除纯噪声伪峰
+                        if sync_pow_init < 1.0 {
+                            return None;
+                        }
+                        let (cd0, f1, ibest, drift, sync_pow) = if delf.abs() < 0.05 {
+                            if config.enable_drift {
+                                let (ib, _, dr, sp) = self.searcher.fine_sync_with_drift(cd0_buf, cand.dt, true);
+                                (&*cd0_buf, cand.freq, ib, dr, sp)
+                            } else {
+                                (&*cd0_buf, cand.freq, ibest_init, 0.0, sync_pow_init)
+                            }
                         } else {
                             let f1 = cand.freq + delf;
                             self.downsampler.downsample_to_slice(&long_fft, f1, cd1_buf);
-                            (&*cd1_buf, f1)
+                            let (ib, _, dr, sp) = self.searcher.fine_sync_with_drift(cd1_buf, cand.dt, config.enable_drift);
+                            (&*cd1_buf, f1, ib, dr, sp)
                         };
-                        let (ibest, _, drift, sync_pow) = self.searcher.fine_sync_with_drift(cd0, cand.dt, config.enable_drift);
                         let xbase = baseline.get_xbase(f1);
                         self.extractor
                             .extract_and_decode(cd0, ibest, f1, drift, sync_pow, xbase, config.deep_search)

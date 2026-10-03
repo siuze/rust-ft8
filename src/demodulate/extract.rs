@@ -225,18 +225,22 @@ impl SymbolExtractor {
 
         // 第二阶段：若 BP 全部失败，使用 BP 保存的累计 LLR 回退尝试 OSD 译码 (对标 WSJT-X maxosd)
         if decode_result.is_none() {
-            let osd_passes: &[&[f32; LDPC_N]] = if deep_search {
-                &[&llra, &llrb, &llrc, &llrd]
-            } else {
-                &[&llra, &llrb]
-            };
-            let max_osd_trials = if deep_search { 3 } else { 2 };
-            for llr_pass in osd_passes {
-                if let Some(dec_res) = decode174_91(llr_pass, max_osd_trials, OsdDepth::Order2, None) {
-                    let max_err = if deep_search { 30 } else { 26 };
-                    if dec_res.hard_errors <= max_err && !dec_res.codeword.iter().all(|&b| b == 0) {
-                        decode_result = Some(dec_res);
-                        break;
+            // 准入条件：同步符号匹配度至少达到门限，彻底杜绝纯噪声假峰触发 4095 次高开销矩阵搜索
+            let min_nsync_for_osd = if deep_search { 7 } else { 9 };
+            if nsync >= min_nsync_for_osd {
+                let osd_passes: &[&[f32; LDPC_N]] = if deep_search {
+                    &[&llra, &llrb]
+                } else {
+                    &[&llra]
+                };
+                let max_osd_trials = if deep_search { 2 } else { 1 };
+                for llr_pass in osd_passes {
+                    if let Some(dec_res) = decode174_91(llr_pass, max_osd_trials, OsdDepth::Order2, None) {
+                        let max_err = if deep_search { 30 } else { 26 };
+                        if dec_res.hard_errors <= max_err && !dec_res.codeword.iter().all(|&b| b == 0) {
+                            decode_result = Some(dec_res);
+                            break;
+                        }
                     }
                 }
             }

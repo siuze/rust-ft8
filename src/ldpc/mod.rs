@@ -98,15 +98,17 @@ pub fn decode174_91(
                         });
                     }
                 }
-                // 最后尝试原始 LLR
-                if let Some(osd_res) = osd_decode(llr, depth) {
-                    return Some(DecodeResult {
-                        message77: osd_res.message77,
-                        message91: osd_res.message91,
-                        codeword: osd_res.codeword,
-                        hard_errors: osd_res.hard_errors,
-                        decode_type: DecodeType::Osd,
-                    });
+                // 若累计 LLR 为空，回退尝试原始 LLR
+                if trials == 0 {
+                    if let Some(osd_res) = osd_decode(llr, depth) {
+                        return Some(DecodeResult {
+                            message77: osd_res.message77,
+                            message91: osd_res.message91,
+                            codeword: osd_res.codeword,
+                            hard_errors: osd_res.hard_errors,
+                            decode_type: DecodeType::Osd,
+                        });
+                    }
                 }
             }
 
